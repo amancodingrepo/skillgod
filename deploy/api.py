@@ -4,7 +4,8 @@ SkillGod API — Railway deployment.
 Handles:
   - Razorpay webhook  →  generate license key  →  email to customer
   - License key validation for `sg sync --key`
-  - Signal aggregation (v1.1)
+  - User tracking (signups, installs, syncs, referrals)
+  - Admin dashboard endpoint
 
 Environment variables (set in Railway dashboard):
   RAZORPAY_KEY_ID
@@ -15,6 +16,7 @@ Environment variables (set in Railway dashboard):
   SMTP_USER          (hello@skillgod.dev)
   SMTP_PASS
   DATABASE_URL       (Railway injects this automatically)
+  ADMIN_KEY          (any secret string — protects /admin/* endpoints)
 """
 
 import hashlib
@@ -31,7 +33,7 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -53,25 +55,68 @@ def _get_db():
 
 
 def _ensure_schema():
-    """Create tables if they don't exist. Called at startup."""
+    """Create all tables. Called at startup — safe to run multiple times."""
     try:
         conn = _get_db()
         cur  = conn.cursor()
         cur.execute("""
+            -- Core license table
             CREATE TABLE IF NOT EXISTS licenses (
-                key                     TEXT PRIMARY KEY,
+                key                      TEXT PRIMARY KEY,
                 razorpay_subscription_id TEXT,
                 razorpay_payment_id      TEXT,
-                email                   TEXT NOT NULL,
-                plan                    TEXT NOT NULL DEFAULT 'pro',
-                created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                active                  BOOLEAN NOT NULL DEFAULT TRUE,
-                machine_id              TEXT DEFAULT ''
+                email                    TEXT NOT NULL,
+                plan                     TEXT NOT NULL DEFAULT 'pro',
+                created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                active                   BOOLEAN NOT NULL DEFAULT TRUE,
+                machine_id               TEXT DEFAULT ''
+            );
+
+            -- User profiles (one row per email)
+            CREATE TABLE IF NOT EXISTS users (
+                email          TEXT PRIMARY KEY,
+                plan           TEXT NOT NULL DEFAULT 'free',
+                status         TEXT NOT NULL DEFAULT 'active',
+                referral_code  TEXT UNIQUE,
+                referred_by    TEXT,
+                first_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_active    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                install_count  INTEGER NOT NULL DEFAULT 0,
+                sync_count     INTEGER NOT NULL DEFAULT 0,
+                paid_at        TIMESTAMPTZ,
+                cancelled_at   TIMESTAMPTZ
+            );
+
+            -- Usage events: installs, syncs, skill_used, etc.
+            CREATE TABLE IF NOT EXISTS events (
+                id          SERIAL PRIMARY KEY,
+                email       TEXT,
+                machine_id  TEXT,
+                event_type  TEXT NOT NULL,
+                plan        TEXT DEFAULT '',
+                metadata    JSONB DEFAULT '{}',
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS events_email_idx      ON events(email);
+            CREATE INDEX IF NOT EXISTS events_type_idx       ON events(event_type);
+            CREATE INDEX IF NOT EXISTS events_created_at_idx ON events(created_at DESC);
+
+            -- Referral tracking
+            CREATE TABLE IF NOT EXISTS referrals (
+                id              SERIAL PRIMARY KEY,
+                referrer_email  TEXT NOT NULL,
+                referee_email   TEXT NOT NULL UNIQUE,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                converted       BOOLEAN NOT NULL DEFAULT FALSE,
+                converted_at    TIMESTAMPTZ,
+                reward_given    BOOLEAN NOT NULL DEFAULT FALSE,
+                reward_given_at TIMESTAMPTZ
             );
         """)
         conn.commit()
         cur.close()
         conn.close()
+        print("[startup] schema ready")
     except Exception as e:
         print(f"[startup] schema warning: {e}")
 
@@ -79,6 +124,128 @@ def _ensure_schema():
 @app.on_event("startup")
 def startup():
     _ensure_schema()
+
+
+# ---------------------------------------------------------------------------
+# User helpers
+# ---------------------------------------------------------------------------
+
+def _upsert_user(email: str, plan: str = "free",
+                 referred_by: str = "", paid: bool = False):
+    """Create or update a user row. Safe to call repeatedly."""
+    conn = _get_db()
+    cur  = conn.cursor()
+    # Generate a unique referral code for new users
+    code = "SG" + secrets.token_urlsafe(6).upper()[:8]
+    now  = "NOW()"
+    cur.execute(
+        """
+        INSERT INTO users (email, plan, referral_code, referred_by, first_seen, last_active, paid_at)
+        VALUES (%s, %s, %s, NULLIF(%s,''), NOW(), NOW(), %s)
+        ON CONFLICT (email) DO UPDATE SET
+            plan        = EXCLUDED.plan,
+            last_active = NOW(),
+            paid_at     = COALESCE(users.paid_at, EXCLUDED.paid_at)
+        """,
+        (email, plan, code, referred_by, "NOW()" if paid else None)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def _track_event(email: str, event_type: str, machine_id: str = "",
+                 plan: str = "", metadata: dict = None):
+    """Append a usage event. Fire-and-forget, never raises."""
+    try:
+        conn = _get_db()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO events (email, machine_id, event_type, plan, metadata, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            """,
+            (email or None, machine_id or None, event_type, plan,
+             json.dumps(metadata or {}))
+        )
+        # Increment counters on users table
+        if email and event_type == "install":
+            cur.execute(
+                "UPDATE users SET install_count = install_count + 1, last_active = NOW() WHERE email = %s",
+                (email,)
+            )
+        elif email and event_type == "sync":
+            cur.execute(
+                "UPDATE users SET sync_count = sync_count + 1, last_active = NOW() WHERE email = %s",
+                (email,)
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[track_event] {e}")
+
+
+def _handle_referral(referee_email: str, referrer_code: str):
+    """
+    Record referral when a new user signs up with a referral code.
+    Looks up referrer by referral_code, inserts into referrals table.
+    """
+    if not referrer_code:
+        return
+    try:
+        conn = _get_db()
+        cur  = conn.cursor()
+        cur.execute("SELECT email FROM users WHERE referral_code = %s", (referrer_code,))
+        row = cur.fetchone()
+        if row:
+            referrer_email = row["email"]
+            cur.execute(
+                """
+                INSERT INTO referrals (referrer_email, referee_email, created_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (referee_email) DO NOTHING
+                """,
+                (referrer_email, referee_email)
+            )
+            conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[referral] {e}")
+
+
+def _convert_referral(referee_email: str):
+    """
+    Called when a referred user converts to paid.
+    Marks referral converted, flags reward_given = False (you send reward manually or via email).
+    """
+    try:
+        conn = _get_db()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            UPDATE referrals SET converted = TRUE, converted_at = NOW()
+            WHERE referee_email = %s AND converted = FALSE
+            """,
+            (referee_email,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[referral convert] {e}")
+
+
+# ---------------------------------------------------------------------------
+# Admin auth
+# ---------------------------------------------------------------------------
+
+def _check_admin(x_admin_key: str):
+    """Raise 403 if admin key is wrong."""
+    expected = os.environ.get("ADMIN_KEY", "")
+    if not expected or x_admin_key != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +393,10 @@ async def razorpay_webhook(request: Request):
             key = _generate_key()
             _store_key(key, email, plan, sub_id, pay_id)
             _send_key_email(email, key, plan)
+            _upsert_user(email, plan=plan, paid=True)
+            _convert_referral(email)
+            _track_event(email, "payment_captured", plan=plan,
+                         metadata={"payment_id": pay_id, "subscription_id": sub_id})
             print(f"[webhook] key issued for {email[:4]}*** plan={plan}")
 
     # Subscription renewal — keep existing key active (no new key)
@@ -319,7 +490,201 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# Signals (future — activate when Railway Postgres has enough data)
+# Tracking — called by sg init and sg sync
+# ---------------------------------------------------------------------------
+
+class TrackPayload(BaseModel):
+    event:      str        # install | sync | skill_used | session_start
+    machine_id: str = ""
+    email:      str = ""
+    plan:       str = ""
+    referral:   str = ""   # referral code used at install time
+    metadata:   dict = {}
+
+
+@app.post("/v1/track")
+def track(payload: TrackPayload):
+    """
+    Anonymous-friendly event tracking.
+    - install: fired by `sg init` (no email required)
+    - sync:    fired by `sg sync --key` (has email from license lookup)
+    """
+    if payload.email:
+        _upsert_user(payload.email, plan=payload.plan or "free",
+                     referred_by=payload.referral)
+        if payload.referral:
+            _handle_referral(payload.email, payload.referral)
+
+    _track_event(
+        email=payload.email,
+        event_type=payload.event,
+        machine_id=payload.machine_id,
+        plan=payload.plan,
+        metadata=payload.metadata,
+    )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints (protected by ADMIN_KEY header)
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/stats")
+def admin_stats(x_admin_key: str = Header(default="")):
+    """
+    High-level dashboard numbers.
+    Call with: curl -H 'x-admin-key: YOUR_KEY' https://api.skillgod.dev/admin/stats
+    """
+    _check_admin(x_admin_key)
+    conn = _get_db()
+    cur  = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) AS total FROM users")
+    total_users = cur.fetchone()["total"]
+
+    cur.execute("SELECT COUNT(*) AS n FROM users WHERE plan != 'free'")
+    paid_users = cur.fetchone()["n"]
+
+    cur.execute("SELECT COUNT(*) AS n FROM users WHERE plan = 'free'")
+    free_users = cur.fetchone()["n"]
+
+    cur.execute("SELECT COUNT(*) AS n FROM users WHERE plan = 'early_adopter'")
+    early_adopters = cur.fetchone()["n"]
+
+    cur.execute("SELECT COUNT(*) AS n FROM licenses WHERE active = TRUE")
+    active_licenses = cur.fetchone()["n"]
+
+    cur.execute("SELECT COUNT(*) AS n FROM referrals WHERE converted = TRUE")
+    converted_referrals = cur.fetchone()["n"]
+
+    cur.execute("SELECT COUNT(*) AS n FROM referrals WHERE reward_given = FALSE AND converted = TRUE")
+    pending_rewards = cur.fetchone()["n"]
+
+    cur.execute("""
+        SELECT event_type, COUNT(*) AS n
+        FROM events
+        WHERE created_at > NOW() - INTERVAL '7 days'
+        GROUP BY event_type
+        ORDER BY n DESC
+    """)
+    events_7d = {r["event_type"]: r["n"] for r in cur.fetchall()}
+
+    cur.execute("""
+        SELECT DATE(created_at) AS day, COUNT(*) AS installs
+        FROM events WHERE event_type = 'install'
+        AND created_at > NOW() - INTERVAL '14 days'
+        GROUP BY day ORDER BY day DESC
+    """)
+    installs_by_day = [{"day": str(r["day"]), "installs": r["installs"]}
+                       for r in cur.fetchall()]
+
+    cur.close()
+    conn.close()
+
+    mrr_7 = early_adopters * 7
+    mrr_10 = (paid_users - early_adopters) * 10
+
+    return {
+        "users": {
+            "total":          total_users,
+            "paid":           paid_users,
+            "free":           free_users,
+            "early_adopters": early_adopters,
+        },
+        "revenue": {
+            "active_licenses":    active_licenses,
+            "mrr_estimate_usd":   mrr_7 + mrr_10,
+            "early_adopter_slots_left": max(0, 200 - early_adopters),
+        },
+        "referrals": {
+            "converted":      converted_referrals,
+            "pending_rewards": pending_rewards,
+        },
+        "activity_7d":   events_7d,
+        "installs_14d":  installs_by_day,
+    }
+
+
+@app.get("/admin/users")
+def admin_users(
+    limit: int = 50,
+    offset: int = 0,
+    plan: str = "",
+    x_admin_key: str = Header(default=""),
+):
+    """List all users. Filter by plan= (free/pro/early_adopter)."""
+    _check_admin(x_admin_key)
+    conn = _get_db()
+    cur  = conn.cursor()
+
+    if plan:
+        cur.execute(
+            """
+            SELECT email, plan, status, referral_code, referred_by,
+                   first_seen, last_active, install_count, sync_count, paid_at
+            FROM users WHERE plan = %s
+            ORDER BY first_seen DESC LIMIT %s OFFSET %s
+            """,
+            (plan, limit, offset)
+        )
+    else:
+        cur.execute(
+            """
+            SELECT email, plan, status, referral_code, referred_by,
+                   first_seen, last_active, install_count, sync_count, paid_at
+            FROM users ORDER BY first_seen DESC LIMIT %s OFFSET %s
+            """,
+            (limit, offset)
+        )
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {"users": [dict(r) for r in rows], "count": len(rows)}
+
+
+@app.get("/admin/referrals")
+def admin_referrals(
+    unconverted_only: bool = False,
+    x_admin_key: str = Header(default=""),
+):
+    """List referrals. Use unconverted_only=true to see pending conversions."""
+    _check_admin(x_admin_key)
+    conn = _get_db()
+    cur  = conn.cursor()
+    if unconverted_only:
+        cur.execute(
+            "SELECT * FROM referrals WHERE converted = FALSE ORDER BY created_at DESC"
+        )
+    else:
+        cur.execute("SELECT * FROM referrals ORDER BY created_at DESC LIMIT 200")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {"referrals": [dict(r) for r in rows]}
+
+
+@app.post("/admin/reward/{referral_id}")
+def mark_reward_given(
+    referral_id: int,
+    x_admin_key: str = Header(default=""),
+):
+    """Mark a referral reward as given (1 free month sent)."""
+    _check_admin(x_admin_key)
+    conn = _get_db()
+    cur  = conn.cursor()
+    cur.execute(
+        "UPDATE referrals SET reward_given = TRUE, reward_given_at = NOW() WHERE id = %s",
+        (referral_id,)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Signals
 # ---------------------------------------------------------------------------
 
 class SignalPayload(BaseModel):
@@ -329,5 +694,4 @@ class SignalPayload(BaseModel):
 
 @app.post("/v1/signals")
 def receive_signals(payload: SignalPayload):
-    # v1.2: store in postgres for aggregate analytics
     return {"received": len(payload.signals)}
