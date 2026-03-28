@@ -1,0 +1,4 @@
+#!/bin/bash
+# SkillGod install redirect
+# curl -fsSL skillgod.dev/install | sh
+exec curl -fsSL "https://raw.githubusercontent.com/amancodingrepo/skillgod/main/scripts/install.sh" | bash

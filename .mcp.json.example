@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "skillgod": {
+      "command": "python",
+      "args": ["SKILLGOD_ROOT/engine/mcp_server.py"],
+      "env": {
+        "SKILLGOD_PROJECT": "your-project-name",
+        "SKILLGOD_PORT": "3333"
+      }
+    }
+  }
+}

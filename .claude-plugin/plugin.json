@@ -1,0 +1,32 @@
+{
+  "name": "skillgod",
+  "version": "1.0.0",
+  "description": "Claude Code on steroids — skills, memory, and agents for any AI coding tool",
+  "author": "SkillGod",
+  "homepage": "https://skillgod.dev",
+  "license": "MIT",
+  "engines": {
+    "claude-code": ">=1.0.0"
+  },
+  "mcp": {
+    "command": "python",
+    "args": ["${pluginDir}/engine/mcp_server.py"],
+    "env": {
+      "SKILLGOD_ROOT": "${pluginDir}"
+    }
+  },
+  "skills": [
+    {
+      "name": "skillgod-core",
+      "path": "vault/",
+      "description": "885 curated skills across coding, design, writing, devops, security and agents"
+    }
+  ],
+  "commands": {
+    "sg-find":      "Find skills for current task",
+    "sg-learn":     "Save current output as skill",
+    "sg-stats":     "Show vault statistics",
+    "sg-build":     "Build a new skill interactively",
+    "sg-stocktake": "Audit vault health"
+  }
+}

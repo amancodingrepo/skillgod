@@ -1,0 +1,20 @@
+---
+name: page-cro
+type: skill
+source: voltagent-official
+description: Use when improve conversion rates on any marketing page including homepages and landing pages
+tags: []
+triggers: [page, improve, conversion, rates]
+confidence: 0.88
+origin_url: https://github.com/coreyhaines31/marketingskills/tree/main/skills/page-cro
+uses: 0
+---
+
+## page-cro
+
+Use when improve conversion rates on any marketing page including homepages and landing pages
+
+**Official team skill from:** [coreyhaines31/page-cro](https://github.com/coreyhaines31/marketingskills/tree/main/skills/page-cro)
+
+This is an official skill maintained by the team that built the library.
+Fetch the full SKILL.md from the URL above for complete methodology.

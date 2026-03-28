@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkillGod — Claude Code on steroids</title>
+  <meta name="description" content="1,944 skills, persistent memory, and multi-agent orchestration for any AI coding tool. Free to install." />
+  <meta property="og:title" content="SkillGod — Claude Code on steroids" />
+  <meta property="og:description" content="1,944 skills, persistent memory, and multi-agent orchestration for any AI coding tool. Free to install." />
+  <meta property="og:url" content="https://skillgod.dev" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="SkillGod — Claude Code on steroids" />
+  <meta name="twitter:description" content="1,944 skills, persistent memory, and multi-agent orchestration. Free to install." />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0a0a;
+      --surface:   #111111;
+      --border:    #1e1e1e;
+      --text:      #e8e8e8;
+      --muted:     #666;
+      --accent:    #7c6aff;
+      --accent2:   #4ade80;
+      --danger:    #f87171;
+      --mono:      'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* NAV */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1rem 2rem;
+      background: rgba(10,10,10,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo { font-family: var(--mono); font-size: 1.1rem; color: var(--text); text-decoration: none; font-weight: 700; }
+    .nav-logo span { color: var(--accent); }
+    .nav-links { display: flex; gap: 2rem; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 0.9rem; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta {
+      background: var(--accent); color: #fff; border: none; border-radius: 6px;
+      padding: 0.5rem 1.2rem; font-size: 0.9rem; cursor: pointer; text-decoration: none;
+      font-weight: 600; transition: opacity 0.2s;
+    }
+    .nav-cta:hover { opacity: 0.85; }
+
+    /* HERO */
+    .hero {
+      padding: 10rem 2rem 6rem;
+      text-align: center;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(124,106,255,0.12);
+      border: 1px solid rgba(124,106,255,0.3);
+      color: var(--accent);
+      font-size: 0.8rem;
+      padding: 0.3rem 0.9rem;
+      border-radius: 999px;
+      margin-bottom: 1.5rem;
+      font-family: var(--mono);
+    }
+    h1 {
+      font-size: clamp(2.4rem, 6vw, 4rem);
+      font-weight: 800;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      margin-bottom: 1.2rem;
+    }
+    h1 em { color: var(--accent); font-style: normal; }
+    .tagline {
+      font-size: 1.15rem;
+      color: var(--muted);
+      margin-bottom: 2.5rem;
+      max-width: 560px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    /* INSTALL BOX */
+    .install-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.2rem 1.5rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      max-width: 100%;
+    }
+    .install-cmd {
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      color: var(--accent2);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .copy-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      padding: 0.3rem 0.7rem;
+      font-size: 0.8rem;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .install-note { font-size: 0.82rem; color: var(--muted); margin-bottom: 2.5rem; }
+    .install-note a { color: var(--muted); }
+
+    .hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn-primary {
+      background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      padding: 0.75rem 1.8rem; font-size: 1rem; font-weight: 700;
+      cursor: pointer; text-decoration: none; transition: opacity 0.2s;
+    }
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-secondary {
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 0.75rem 1.8rem; font-size: 1rem; font-weight: 600;
+      cursor: pointer; text-decoration: none; transition: all 0.2s;
+    }
+    .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* STATS */
+    .stats {
+      display: flex; justify-content: center; gap: 3rem; flex-wrap: wrap;
+      padding: 3rem 2rem;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat { text-align: center; }
+    .stat-num { font-size: 2rem; font-weight: 800; color: var(--accent); font-family: var(--mono); }
+    .stat-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.2rem; }
+
+    /* SECTION */
+    section { max-width: 900px; margin: 0 auto; padding: 5rem 2rem; }
+    section h2 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; }
+    section .sub { color: var(--muted); margin-bottom: 3rem; font-size: 1rem; }
+
+    /* BEFORE / AFTER */
+    .ba-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 600px) { .ba-grid { grid-template-columns: 1fr; } }
+    .ba-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+    .ba-card.after { border-color: rgba(124,106,255,0.35); }
+    .ba-label {
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; margin-bottom: 1rem;
+    }
+    .ba-card.before .ba-label { color: var(--danger); }
+    .ba-card.after .ba-label { color: var(--accent2); }
+    .ba-item { display: flex; gap: 0.6rem; margin-bottom: 0.7rem; font-size: 0.9rem; color: var(--muted); }
+    .ba-item .icon { flex-shrink: 0; margin-top: 2px; }
+
+    /* THREE PILLARS */
+    .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+    @media (max-width: 700px) { .pillars { grid-template-columns: 1fr; } }
+    .pillar {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+    .pillar-icon { font-size: 1.8rem; margin-bottom: 0.8rem; }
+    .pillar h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.4rem; }
+    .pillar p { font-size: 0.88rem; color: var(--muted); line-height: 1.6; }
+
+    /* PRICING */
+    .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+    @media (max-width: 750px) { .pricing-grid { grid-template-columns: 1fr; } }
+    .price-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem 1.5rem;
+    }
+    .price-card.featured {
+      border-color: var(--accent);
+      position: relative;
+      background: rgba(124,106,255,0.05);
+    }
+    .price-badge {
+      position: absolute; top: -12px; left: 50%; transform: translateX(-50%);
+      background: var(--accent); color: #fff;
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em;
+      padding: 0.2rem 0.8rem; border-radius: 999px; white-space: nowrap;
+    }
+    .price-name { font-size: 0.9rem; color: var(--muted); margin-bottom: 0.5rem; }
+    .price-amount {
+      font-size: 2.4rem; font-weight: 800; font-family: var(--mono);
+      margin-bottom: 0.3rem; line-height: 1;
+    }
+    .price-amount small { font-size: 1rem; font-weight: 400; color: var(--muted); }
+    .price-note { font-size: 0.8rem; color: var(--accent2); margin-bottom: 1.5rem; font-weight: 600; }
+    .price-features { list-style: none; margin-bottom: 2rem; }
+    .price-features li {
+      font-size: 0.88rem; color: var(--muted);
+      padding: 0.35rem 0;
+      border-bottom: 1px solid var(--border);
+      display: flex; gap: 0.5rem; align-items: flex-start;
+    }
+    .price-features li:last-child { border-bottom: none; }
+    .price-features .tick { color: var(--accent2); flex-shrink: 0; }
+    .price-features .cross { color: var(--border); flex-shrink: 0; }
+    .price-btn {
+      display: block; width: 100%; text-align: center; padding: 0.75rem;
+      border-radius: 8px; font-size: 0.95rem; font-weight: 700;
+      cursor: pointer; text-decoration: none; transition: opacity 0.2s;
+    }
+    .price-btn.primary { background: var(--accent); color: #fff; border: none; }
+    .price-btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    .price-btn:hover { opacity: 0.8; }
+
+    /* REFERRAL */
+    .referral {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2rem;
+      margin-top: 2rem;
+      text-align: center;
+    }
+    .referral h3 { margin-bottom: 0.5rem; }
+    .referral p { color: var(--muted); font-size: 0.9rem; }
+    .referral strong { color: var(--accent2); }
+
+    /* COMMANDS */
+    .cmd-list { display: flex; flex-direction: column; gap: 0.6rem; }
+    .cmd-row {
+      display: grid; grid-template-columns: 180px 1fr;
+      gap: 1rem; align-items: baseline;
+      font-size: 0.9rem;
+    }
+    .cmd-name { font-family: var(--mono); color: var(--accent); }
+    .cmd-desc { color: var(--muted); }
+
+    /* FOOTER */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--text); }
+    footer .footer-links { display: flex; justify-content: center; gap: 2rem; margin-bottom: 1rem; flex-wrap: wrap; }
+
+    /* MOBILE NAV */
+    @media (max-width: 600px) {
+      .nav-links { display: none; }
+      .install-cmd { font-size: 0.78rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a class="nav-logo" href="/"><span>Skill</span>God</a>
+  <div class="nav-links">
+    <a href="#how">How it works</a>
+    <a href="#pricing">Pricing</a>
+    <a href="https://github.com/amancodingrepo/skillgod" target="_blank">GitHub</a>
+  </div>
+  <a class="nav-cta" href="#pricing">Get Early Access — $7/mo</a>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="badge">⚡ Early Adopter — first 200 users lock $7/mo forever</div>
+  <h1>Claude knows how to code.<br><em>SkillGod knows how YOU code.</em></h1>
+  <p class="tagline">
+    1,944 skills, persistent project memory, and multi-agent orchestration —
+    injected into every prompt automatically.
+  </p>
+
+  <div class="install-box">
+    <span class="install-cmd" id="install-cmd">curl -fsSL skillgod.dev/install | sh</span>
+    <button class="copy-btn" onclick="copyInstall()">copy</button>
+  </div>
+  <p class="install-note">
+    Windows: <code style="color:var(--muted);font-size:0.8rem">irm skillgod.dev/install.ps1 | iex</code>
+    &nbsp;·&nbsp; <a href="https://github.com/amancodingrepo/skillgod" target="_blank">or build from source</a>
+  </p>
+
+  <div class="hero-actions">
+    <a class="btn-primary" href="#pricing">Start Free</a>
+    <a class="btn-secondary" href="https://github.com/amancodingrepo/skillgod" target="_blank">★ GitHub</a>
+  </div>
+</div>
+
+<!-- STATS -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-num">1,944</div>
+    <div class="stat-label">curated skills</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">11</div>
+    <div class="stat-label">categories</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">32</div>
+    <div class="stat-label">always-on instincts</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">5</div>
+    <div class="stat-label">lifecycle hooks</div>
+  </div>
+</div>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <h2>Three pillars. One runtime.</h2>
+  <p class="sub">Everything injects automatically. No prompt engineering required.</p>
+
+  <div class="pillars">
+    <div class="pillar">
+      <div class="pillar-icon">🧠</div>
+      <h3>Memory</h3>
+      <p>
+        SQLite-backed project memory. Decisions, patterns, errors —
+        captured after every session, injected before the next one.
+        Claude remembers you chose Zustand over Redux six weeks ago.
+      </p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-icon">⚡</div>
+      <h3>Skills</h3>
+      <p>
+        1,944 scored skills from 12 open-source sources. Each task gets
+        the top 3 most relevant skills injected automatically.
+        32 instincts fire on every single prompt.
+      </p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-icon">🤖</div>
+      <h3>Agents</h3>
+      <p>
+        Complex tasks decompose into specialist agents. Frontend agent
+        gets UI skills. Backend agent gets API skills. Each agent gets
+        exactly what it needs — nobody else does this.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- BEFORE / AFTER -->
+<section>
+  <h2>What changes</h2>
+  <p class="sub">Same Claude. Completely different results.</p>
+  <div class="ba-grid">
+    <div class="ba-card before">
+      <div class="ba-label">Without SkillGod</div>
+      <div class="ba-item"><span class="icon">✗</span> Claude forgets your stack between sessions</div>
+      <div class="ba-item"><span class="icon">✗</span> Generic responses that need 3 correction messages</div>
+      <div class="ba-item"><span class="icon">✗</span> Re-explains your architecture every conversation</div>
+      <div class="ba-item"><span class="icon">✗</span> No idea you use Zustand, not Redux</div>
+      <div class="ba-item"><span class="icon">✗</span> Every agent gets the same generic context</div>
+    </div>
+    <div class="ba-card after">
+      <div class="ba-label">With SkillGod</div>
+      <div class="ba-item"><span class="icon">✓</span> Project memory persists across every session</div>
+      <div class="ba-item"><span class="icon">✓</span> Right skill injected before Claude even starts</div>
+      <div class="ba-item"><span class="icon">✓</span> Your conventions are always in context</div>
+      <div class="ba-item"><span class="icon">✓</span> Remembers every decision you've made</div>
+      <div class="ba-item"><span class="icon">✓</span> Frontend agent gets UI skills, backend gets API skills</div>
+    </div>
+  </div>
+</section>
+
+<!-- CLI COMMANDS -->
+<section>
+  <h2>One CLI. Everything wired.</h2>
+  <p class="sub">Install once. Works with Claude Code, Cursor, Windsurf, and anything that supports MCP.</p>
+  <div class="cmd-list">
+    <div class="cmd-row"><span class="cmd-name">sg init</span><span class="cmd-desc">Detect IDE, write .mcp.json, wire hooks — done in 10 seconds</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg find "task"</span><span class="cmd-desc">Score vault against a task, show top matches with scores</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg stats</span><span class="cmd-desc">Vault health, category counts, index status</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg learn</span><span class="cmd-desc">Turn any Claude output into a reusable skill</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg build</span><span class="cmd-desc">Interactive skill builder — guided prompts</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg signals</span><span class="cmd-desc">Accept/rework rates — see what's actually working</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg promote</span><span class="cmd-desc">Review auto-learned skills, approve for vault</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg scan "text"</span><span class="cmd-desc">Detect prompt injection before it reaches your model</span></div>
+    <div class="cmd-row"><span class="cmd-name">sg sync --key KEY</span><span class="cmd-desc">Decrypt and sync full Pro vault (Pro only)</span></div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section id="pricing">
+  <h2>Pricing</h2>
+  <p class="sub">Free to install. Pay for the living vault.</p>
+
+  <div class="pricing-grid">
+
+    <!-- FREE -->
+    <div class="price-card">
+      <div class="price-name">Free</div>
+      <div class="price-amount">$0 <small>/ forever</small></div>
+      <div class="price-note">No account needed</div>
+      <ul class="price-features">
+        <li><span class="tick">✓</span> 30 starter skills</li>
+        <li><span class="tick">✓</span> All 32 instincts</li>
+        <li><span class="tick">✓</span> Full SQLite memory layer</li>
+        <li><span class="tick">✓</span> Basic agent layer</li>
+        <li><span class="tick">✓</span> sg init, find, learn, build</li>
+        <li><span class="cross">–</span> Full vault (1,944 skills)</li>
+        <li><span class="cross">–</span> Monthly vault updates</li>
+        <li><span class="cross">–</span> Signal analytics</li>
+      </ul>
+      <a class="price-btn secondary" href="https://github.com/amancodingrepo/skillgod" target="_blank">Install from GitHub</a>
+    </div>
+
+    <!-- EARLY ADOPTER -->
+    <div class="price-card featured">
+      <div class="price-badge">⚡ FIRST 200 USERS</div>
+      <div class="price-name">Early Adopter</div>
+      <div class="price-amount">$7 <small>/ mo</small></div>
+      <div class="price-note">Locked forever — price never goes up</div>
+      <ul class="price-features">
+        <li><span class="tick">✓</span> Everything in Free</li>
+        <li><span class="tick">✓</span> Full vault — 1,944 skills</li>
+        <li><span class="tick">✓</span> Monthly vault updates</li>
+        <li><span class="tick">✓</span> Full multi-agent support</li>
+        <li><span class="tick">✓</span> Skill enhancer</li>
+        <li><span class="tick">✓</span> Signal analytics</li>
+        <li><span class="tick">✓</span> sg sync --key</li>
+        <li><span class="tick">✓</span> Price locked forever</li>
+      </ul>
+      <a class="price-btn primary" href="https://lemon.squeezy.com/buy/REPLACE_WITH_YOUR_URL" target="_blank">Lock $7/mo Now</a>
+    </div>
+
+    <!-- PRO -->
+    <div class="price-card">
+      <div class="price-name">Pro</div>
+      <div class="price-amount">$10 <small>/ mo</small></div>
+      <div class="price-note">After first 200 users</div>
+      <ul class="price-features">
+        <li><span class="tick">✓</span> Everything in Free</li>
+        <li><span class="tick">✓</span> Full vault — 1,944 skills</li>
+        <li><span class="tick">✓</span> Monthly vault updates</li>
+        <li><span class="tick">✓</span> Full multi-agent support</li>
+        <li><span class="tick">✓</span> Skill enhancer</li>
+        <li><span class="tick">✓</span> Signal analytics</li>
+        <li><span class="tick">✓</span> sg sync --key</li>
+        <li><span class="cross">–</span> Price not locked</li>
+      </ul>
+      <a class="price-btn secondary" href="https://lemon.squeezy.com/buy/REPLACE_WITH_YOUR_URL" target="_blank">Get Pro</a>
+    </div>
+
+  </div>
+
+  <!-- REFERRAL -->
+  <div class="referral">
+    <h3>Referral program</h3>
+    <p>
+      Share your referral link → friend signs up at <strong>$7/mo locked forever</strong>, even after the 200-user window closes.<br />
+      Your friend converts to paid → you get <strong>1 free month</strong> ($10 value) automatically.
+    </p>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-links">
+    <a href="https://github.com/amancodingrepo/skillgod" target="_blank">GitHub</a>
+    <a href="https://github.com/amancodingrepo/skillgod/blob/main/README.md" target="_blank">Docs</a>
+    <a href="mailto:hello@skillgod.dev">hello@skillgod.dev</a>
+  </div>
+  <p>SkillGod is open source. The vault is the product. The runtime is free.</p>
+</footer>
+
+<script>
+  function copyInstall() {
+    const cmd = document.getElementById('install-cmd').textContent;
+    navigator.clipboard.writeText(cmd).then(() => {
+      const btn = document.querySelector('.copy-btn');
+      btn.textContent = 'copied!';
+      btn.style.color = 'var(--accent2)';
+      btn.style.borderColor = 'var(--accent2)';
+      setTimeout(() => {
+        btn.textContent = 'copy';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+      }, 2000);
+    });
+  }
+</script>
+
+</body>
+</html>
