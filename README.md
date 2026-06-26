@@ -93,7 +93,6 @@ irm https://skillgod.dev/install.ps1 | iex
 git clone https://github.com/amancodingrepo/skillgod
 cd skillgod
 pip install -r requirements.txt
-python engine/ingest.py
 sg init
 ```
 
@@ -177,7 +176,7 @@ vault_stats()             → live vault counts
 |---------|------|---------------|-----|
 | **Price** | Free forever | **$7/mo locked forever** | $10/mo |
 | **Who** | Everyone | First 200 users only | User 201+ |
-| Skills | 30 starter skills | 885+ (full vault) | 885+ (full vault) |
+| Skills | 30 starter skills | 1,944 (full vault) | 1,944 (full vault) |
 | Instincts | All 32 | All 32 | All 32 |
 | Memory | Full SQLite layer | Full SQLite layer | Full SQLite layer |
 | Agent layer | Basic | Full multi-agent | Full multi-agent |
