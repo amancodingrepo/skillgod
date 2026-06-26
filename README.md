@@ -1,4 +1,4 @@
-# SkillGod
+# SkillGod ![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-v1.0.0-green) ![Skills](https://img.shields.io/badge/free_skills-30-orange) ![Pro Skills](https://img.shields.io/badge/pro_skills-1944-purple)
 
 **Claude knows how to code. SkillGod knows how *you* code.**
 
