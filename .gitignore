@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.db
+*.sg
+.env
+*.env.*
+db/
+engine/__pycache__/
+cli/sg
+cli/sg.exe
+.DS_Store
