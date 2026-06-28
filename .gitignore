@@ -9,3 +9,20 @@ engine/__pycache__/
 cli/sg
 cli/sg.exe
 .DS_Store
+
+# Admin build tools — never publish
+engine/build_vault_release.py
+engine/_wtest.txt
+
+# Pro vault skills — distribute encrypted via R2, not here
+vault/coding/
+vault/design/
+vault/devops/
+vault/security/
+vault/research/
+vault/agents/
+vault/writing/
+vault_pro*.zip
+
+# Internal research clones
+sources/

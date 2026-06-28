@@ -68,7 +68,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 	preVerify, _ := runPython(sgRoot,
 		fmt.Sprintf(`from encryption import verify_key; print(verify_key('%s'))`, escaped))
 	if strings.TrimSpace(preVerify) != "True" {
-		if fetched := fetchVaultFromServer(sgRoot, licenseKey, green, yellow); fetched {
+		// Prefer the R2/CDN path (one static zip, downloaded direct from R2).
+		// Fall back to per-machine server encryption if R2 isn't configured.
+		if fetched := fetchVaultFromR2(sgRoot, licenseKey, green, yellow); fetched {
+			fmt.Printf("  %s Vault downloaded from CDN for this machine\n", green("[OK]"))
+		} else if fetched := fetchVaultFromServer(sgRoot, licenseKey, green, yellow); fetched {
 			fmt.Printf("  %s Vault downloaded for this machine\n", green("[OK]"))
 		}
 	}
@@ -217,6 +221,91 @@ func fetchVaultFromServer(sgRoot, key string, green, yellow func(...interface{})
 		}
 	}
 	return written > 0
+}
+
+// fetchVaultFromR2 downloads the static, release-key-encrypted vault_pro.zip
+// directly from R2 (via a presigned URL the API signs), then has the python
+// engine unwrap the per-machine release key and install vault_encrypted/.
+// Returns true on success, false if the R2 path isn't available (caller then
+// falls back to the per-machine /v1/vault/fetch path).
+func fetchVaultFromR2(sgRoot, key string, green, yellow func(...interface{}) string) bool {
+	apiURL := os.Getenv("SKILLGOD_API")
+	if apiURL == "" {
+		apiURL = "https://api.skillgod.dev"
+	}
+
+	mid, _ := runPython(sgRoot, "from encryption import get_machine_id; print(get_machine_id())")
+	mid = strings.TrimSpace(mid)
+	if mid == "" {
+		return false
+	}
+
+	// 1. Ask the API for a presigned R2 URL + the release key wrapped to us.
+	req, err := http.NewRequest("GET", strings.TrimRight(apiURL, "/")+"/v1/vault/signed-url", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-License-Key", key)
+	req.Header.Set("X-Machine-Id", mid)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return false // not configured / no entitlement — fall back
+	}
+	var meta struct {
+		URL               string `json:"url"`
+		Version           string `json:"version"`
+		WrappedReleaseKey string `json:"wrapped_release_key"`
+	}
+	derr := json.NewDecoder(resp.Body).Decode(&meta)
+	resp.Body.Close()
+	if derr != nil || meta.URL == "" || meta.WrappedReleaseKey == "" {
+		return false // no zip/key available — fall back to per-machine fetch
+	}
+
+	// 2. Download the zip straight from R2.
+	zresp, err := (&http.Client{Timeout: 180 * time.Second}).Get(meta.URL)
+	if err != nil || zresp.StatusCode != 200 {
+		if zresp != nil {
+			zresp.Body.Close()
+		}
+		fmt.Printf("  %s could not download vault from CDN\n", yellow("[warn]"))
+		return false
+	}
+	defer zresp.Body.Close()
+
+	tmp, err := os.CreateTemp("", "vault_pro_*.zip")
+	if err != nil {
+		return false
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmp, zresp.Body); err != nil {
+		tmp.Close()
+		return false
+	}
+	tmp.Close()
+
+	// 3. Hand the zip + wrapped key to the engine: unwrap K_rel, decrypt, and
+	//    re-encrypt under this machine's key into vault_encrypted/.
+	escKey := strings.ReplaceAll(key, "'", `\'`)
+	escWrap := strings.ReplaceAll(meta.WrappedReleaseKey, "'", `\'`)
+	escZip := strings.ReplaceAll(filepath.ToSlash(tmpPath), "'", `\'`)
+	installCode := fmt.Sprintf(
+		`from encryption import install_release_zip; `+
+			`print(install_release_zip('%s', '%s', '%s'))`,
+		escZip, escWrap, escKey,
+	)
+	out, ierr := runPython(sgRoot, installCode)
+	if ierr != nil {
+		return false
+	}
+	out = strings.TrimSpace(out)
+	return out != "" && out != "0"
 }
 
 // checkVaultUpdate pings /v1/vault/latest to see if a newer vault exists.

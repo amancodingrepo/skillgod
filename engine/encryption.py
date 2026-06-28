@@ -318,6 +318,116 @@ def decrypt_skill(source, license_key: str = "", machine_id: str = "",
 
 
 # ---------------------------------------------------------------------------
+# Release-key delivery (R2 / CDN path)
+# ---------------------------------------------------------------------------
+# A single static vault_pro.zip is built ONCE per release, with every skill
+# encrypted under a random 32-byte *release key* (K_rel). R2 serves that one zip
+# to everyone. The release key is never shipped in the clear: at `sg sync` the
+# server hands back K_rel *wrapped* (AES-GCM) to the caller's own machine, so
+# only an active, paying machine can unwrap it. On install the client re-encrypts
+# the skills under its per-machine key into vault_encrypted/, so the existing
+# verify_key() / sync_encrypted_vault() pipeline runs downstream unchanged.
+
+RELEASE_KEY_FILE = ".release_key"   # local kv fallback (CLI stores the wrapped key here)
+
+
+def _derive_wrap_key(license_key: str, machine_id: str) -> bytes:
+    """
+    Key used ONLY to wrap/unwrap the release key. Bound to license_key + machine_id
+    but NOT to the rotating server session token — the wrapped key is gated server
+    side by an active-license check at /v1/vault/signed-url, and re-sync is required
+    after revocation. Keeping it token-free makes wrap (server) and unwrap (client)
+    derive identically regardless of FIX-8 token state.
+    """
+    material = f"wrap:{license_key}:{machine_id}".encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", material, SALT, PBKDF2_ITERS, dklen=32)
+
+
+def build_release_zip(out_path: str = "", version: str = "dev") -> tuple[str, str]:
+    """
+    Build the static, release-key-encrypted vault_pro.zip.
+    Returns (zip_path, release_key_b64). Run at release time, then upload the zip
+    to R2 and store release_key_b64 against the version (see build_vault_release.py).
+    """
+    import base64
+    import zipfile
+
+    import tempfile
+    K_rel = os.urandom(32)
+    if out_path:
+        out = Path(out_path)
+    else:
+        # Default to system temp dir — Windows Controlled Folder Access blocks
+        # zip creation in protected folders (Desktop, Documents, etc.).
+        out = Path(tempfile.gettempdir()) / f"vault_pro_{version}.zip"
+    count = 0
+    with zipfile.ZipFile(str(out), "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(SENTINEL_NAME, _encrypt_bytes(b"skillgod-sentinel-ok", K_rel))
+        for md in sorted(VAULT_DIR.rglob("*.md")):
+            rel = md.relative_to(VAULT_DIR).with_suffix(".sg")
+            zf.writestr(str(rel).replace("\\", "/"),
+                        _encrypt_bytes(md.read_bytes(), K_rel))
+            count += 1
+        zf.writestr("manifest.json", json.dumps(
+            {"version": version, "skill_count": count, "format": "release-key-v1"}))
+    return str(out), base64.b64encode(K_rel).decode("ascii")
+
+
+def wrap_release_key(release_key_b64: str, license_key: str, machine_id: str = "") -> str:
+    """Server side: encrypt K_rel to a specific (license_key, machine_id). Returns b64."""
+    import base64
+    machine_id = machine_id or get_machine_id()
+    k_rel = base64.b64decode(release_key_b64)
+    wrapped = _encrypt_bytes(k_rel, _derive_wrap_key(license_key, machine_id))
+    return base64.b64encode(wrapped).decode("ascii")
+
+
+def unwrap_release_key(wrapped_b64: str, license_key: str, machine_id: str = "") -> bytes:
+    """Client side: recover K_rel from the wrapped blob. Raises on wrong key/machine."""
+    import base64
+    machine_id = machine_id or get_machine_id()
+    return _decrypt_bytes(base64.b64decode(wrapped_b64),
+                          _derive_wrap_key(license_key, machine_id))
+
+
+def install_release_zip(zip_path: str, wrapped_release_key_b64: str,
+                        license_key: str, machine_id: str = "") -> int:
+    """
+    Client side: take the downloaded release zip + the wrapped release key, and
+    produce the per-machine vault_encrypted/ that the normal sync pipeline expects.
+    Unwrap K_rel, decrypt each skill, re-encrypt under this machine's key, and write
+    vault_encrypted/*.sg + a machine-key sentinel. Returns count of skills written.
+    """
+    import zipfile
+
+    machine_id = machine_id or get_machine_id()
+    k_rel = unwrap_release_key(wrapped_release_key_b64, license_key, machine_id)
+    mkey  = _derive_key(license_key, machine_id)
+
+    ENC_DIR.mkdir(parents=True, exist_ok=True)
+    # Machine-key sentinel so verify_key() passes downstream.
+    (ENC_DIR / SENTINEL_NAME).write_bytes(_encrypt_bytes(b"skillgod-sentinel-ok", mkey))
+
+    count = 0
+    with zipfile.ZipFile(zip_path) as zf:
+        # Verify the release key actually decrypts the zip's sentinel before doing work.
+        try:
+            if _decrypt_bytes(zf.read(SENTINEL_NAME), k_rel) != b"skillgod-sentinel-ok":
+                raise ValueError("release sentinel mismatch — wrong release key")
+        except KeyError:
+            pass  # older zip without sentinel — proceed best-effort
+        for name in zf.namelist():
+            if not name.endswith(".sg") or name == SENTINEL_NAME:
+                continue
+            plaintext = _decrypt_bytes(zf.read(name), k_rel)
+            out = ENC_DIR / name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(_encrypt_bytes(plaintext, mkey))
+            count += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
