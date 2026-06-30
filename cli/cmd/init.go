@@ -387,25 +387,47 @@ func writeVSCodeSettings(settingsPath string) error {
 	return os.WriteFile(settingsPath, out, 0644)
 }
 
+// isSkillGodRoot reports whether dir contains the SkillGod engine.
+func isSkillGodRoot(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "engine", "mcp_server.py"))
+	return err == nil
+}
+
+// findSkillGodRoot locates the installed engine + vault. For users who
+// installed via the one-line installer, this lives in ~/.skillgod (the
+// installer unpacks the engine bundle there). Developers running from a
+// source checkout resolve to the repo via the cwd / parent-walk checks.
 func findSkillGodRoot() (string, error) {
-	if _, err := os.Stat("engine/mcp_server.py"); err == nil {
+	// 1. Explicit override — highest priority.
+	if env := os.Getenv("SKILLGOD_HOME"); env != "" && isSkillGodRoot(env) {
+		return env, nil
+	}
+
+	// 2. Current dir (developer running inside the source repo).
+	if isSkillGodRoot(".") {
 		abs, _ := filepath.Abs(".")
 		return abs, nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Dir(exe)
-	if _, err := os.Stat(filepath.Join(dir, "engine", "mcp_server.py")); err == nil {
-		return dir, nil
-	}
-	for d := dir; d != filepath.Dir(d); d = filepath.Dir(d) {
-		if _, err := os.Stat(filepath.Join(d, "engine", "mcp_server.py")); err == nil {
-			return d, nil
+
+	// 3. Installed location — ~/.skillgod (the installer's target).
+	if home, err := os.UserHomeDir(); err == nil {
+		root := filepath.Join(home, ".skillgod")
+		if isSkillGodRoot(root) {
+			return root, nil
 		}
 	}
-	return "", fmt.Errorf("run sg init from your skillgod project directory")
+
+	// 4. Next to the binary, then walk up its parents.
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for d := dir; d != filepath.Dir(d); d = filepath.Dir(d) {
+			if isSkillGodRoot(d) {
+				return d, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("SkillGod engine not found in ~/.skillgod — reinstall from https://skillgod.dev/download, or set SKILLGOD_HOME to your engine directory")
 }
 
 func pythonCmd() string {
