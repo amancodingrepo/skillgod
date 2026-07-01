@@ -1,4 +1,4 @@
-# SkillGod ![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-v1.0.0-green) ![Skills](https://img.shields.io/badge/free_skills-30-orange) ![Pro Skills](https://img.shields.io/badge/pro_skills-1944-purple)
+# SkillGod ![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-v1.0.0-green) ![Skills](https://img.shields.io/badge/free_skills-30-orange) ![Pro Skills](https://img.shields.io/badge/pro_skills-1927-purple)
 
 **Claude knows how to code. SkillGod knows how *you* code.**
 
@@ -27,7 +27,7 @@ Every session starts cold. SkillGod fixes that.
 | Context per prompt | 0 | 3 scored skills + 32 instincts |
 | Memory across sessions | Cold start every time | SQLite per project |
 | Agent routing | One model, one task | 10 specialist agents, each with own skills |
-| Vault | — | 1,944 skills |
+| Vault | — | 1,927 skills |
 | Learns from your feedback | No | Yes (accept/rework signals) |
 | Prompt injection protection | No | Yes (security scan on every input) |
 
@@ -46,7 +46,7 @@ Your prompt
     ▼
 ┌──────────────────────────────────────────────┐
 │  Pillar 1 — Skills                           │
-│  Score 1,944 skills against your task        │
+│  Score 1,927 skills against your task        │
 │  Inject top 3 + all 32 instincts             │
 │  (instincts fire every single prompt)        │
 └──────────────────────────────────────────────┘
@@ -113,7 +113,7 @@ sg scan "your prompt here"       # test security scanner
 
 ## The vault
 
-**1,944 skills** across 11 categories. Every skill has:
+**1,927 skills** across 11 categories. Every skill has:
 - Trigger words for accurate scoring
 - A description that starts with "Use when..." (not a summary — this is what makes discovery work)
 - Confidence score (0.65–0.95)
@@ -176,7 +176,7 @@ vault_stats()             → live vault counts
 |---------|------|---------------|-----|
 | **Price** | Free forever | **$7/mo locked forever** | $10/mo |
 | **Who** | Everyone | First 200 users only | User 201+ |
-| Skills | 30 starter skills | 1,944 (full vault) | 1,944 (full vault) |
+| Skills | 30 starter skills | 1,927 (full vault) | 1,927 (full vault) |
 | Instincts | All 32 | All 32 | All 32 |
 | Memory | Full SQLite layer | Full SQLite layer | Full SQLite layer |
 | Agent layer | Basic | Full multi-agent | Full multi-agent |
@@ -198,9 +198,9 @@ License via LemonSqueezy. Offline grace period: 30 days — your workflow never 
 
 ## Why the vault is the moat
 
-Anyone can build a skill injector. The vault is 1,944 curated, scored, and formatted skills that have been normalised from 12 source repos into a single consistent format. Every description starts with "Use when..." — not a summary — which is the detail that makes semantic scoring work.
+Anyone can build a skill injector. The vault is 1,927 curated, scored, and formatted skills that have been normalised from 12 source repos into a single consistent format. Every description starts with "Use when..." — not a summary — which is the detail that makes semantic scoring work.
 
-The runtime is open source. The vault is the product. Free tier includes 30 skills — Pro unlocks all 1,944.
+The runtime is open source. The vault is the product. Free tier includes 30 skills — Pro unlocks all 1,927.
 
 ---
 

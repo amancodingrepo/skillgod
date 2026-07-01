@@ -36,9 +36,8 @@ func runRedeem(cmd *cobra.Command, args []string) error {
 import sys, json
 sys.path.insert(0, 'engine')
 from coupons import redeem
-from license import get_machine_id
-machine_id = get_machine_id()
-result = redeem('%s', machine_id)
+from license import get_machine_id, get_install_id
+result = redeem('%s', get_machine_id(), get_install_id())
 print(json.dumps(result))
 `, code))
 
@@ -58,6 +57,23 @@ print(json.dumps(result))
 			if end > 0 {
 				fmt.Printf("  %s\n", result[start:start+end])
 			}
+		}
+
+		// The server mints an SG- license key on redemption. Activate the
+		// full vault with it via the normal (R2) sync path.
+		key := ""
+		if idx := strings.Index(result, `"license_key": "`); idx >= 0 {
+			start := idx + 16
+			end   := strings.Index(result[start:], `"`)
+			if end > 0 {
+				key = result[start : start+end]
+			}
+		}
+		if key != "" {
+			fmt.Println()
+			fmt.Println(bold("Activating Pro vault..."))
+			licenseKey = key            // feed the sync flag
+			return runSync(cmd, []string{})
 		}
 
 		fmt.Println()

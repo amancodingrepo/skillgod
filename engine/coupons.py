@@ -101,75 +101,44 @@ def create_batch(
 
 # ── REDEEM ─────────────────────────────────────────────────
 
-def redeem(code: str, machine_id: str) -> dict:
+def redeem(code: str, machine_id: str, install_id: str = "", email: str = "") -> dict:
     """
-    Redeem a coupon code on this machine.
-    Returns: { success, message, expires_at, tier }
+    Redeem a coupon code against the SkillGod server.
+
+    Coupons live in the SERVER database (admin-issued), not locally — the old
+    local-SQLite lookup always reported server codes as "Invalid". This calls
+    POST /v1/coupon/redeem, which validates + records the redemption and mints
+    an SG- license key so the caller can then `sg sync --key <key>`.
+
+    Returns: { success, message, expires_at, tier, duration, license_key }
     """
-    code = code.upper().strip()
-    conn = get_db()
+    import os
+    import json as _json
+    import urllib.request
+    import urllib.error
 
-    # Check coupon exists and is active
-    coupon = conn.execute(
-        "SELECT * FROM coupons WHERE code=? AND active=1", (code,)
-    ).fetchone()
-
-    if not coupon:
-        conn.close()
-        return {"success": False, "message": "Invalid coupon code"}
-
-    # Check not expired
-    if coupon["expires_at"]:
-        if datetime.now().isoformat() > coupon["expires_at"]:
-            conn.close()
-            return {"success": False, "message": "Coupon has expired"}
-
-    # Check usage limit
-    if coupon["max_uses"] > 0 and coupon["uses"] >= coupon["max_uses"]:
-        conn.close()
-        return {"success": False, "message": "Coupon has reached its usage limit"}
-
-    # Check this machine hasn't already used it
-    already = conn.execute(
-        "SELECT id FROM coupon_redemptions WHERE code=? AND machine_id=?",
-        (code, machine_id)
-    ).fetchone()
-
-    if already:
-        conn.close()
-        return {"success": False, "message": "Coupon already redeemed on this machine"}
-
-    # Calculate expiry
-    if coupon["duration_days"] == 0:
-        expires_at = "2099-12-31"  # permanent
-        duration_str = "permanent"
-    else:
-        expires_at = (
-            datetime.now() + timedelta(days=coupon["duration_days"])
-        ).strftime("%Y-%m-%d")
-        duration_str = f"{coupon['duration_days']} days"
-
-    # Record redemption
-    conn.execute(
-        "INSERT INTO coupon_redemptions (code, machine_id, redeemed_at, expires_at) "
-        "VALUES (?,?,?,?)",
-        (code, machine_id, datetime.now().isoformat(), expires_at)
+    api = os.environ.get("SKILLGOD_API", "https://api.skillgod.dev").rstrip("/")
+    payload = _json.dumps({
+        "code":       code.upper().strip(),
+        "machine_id": machine_id,
+        "install_id": install_id,
+        "email":      email,
+    }).encode()
+    req = urllib.request.Request(
+        api + "/v1/coupon/redeem", data=payload, method="POST",
+        headers={"Content-Type": "application/json",
+                 "User-Agent": "SkillGod-CLI/1.0"},
     )
-
-    # Increment usage count
-    conn.execute(
-        "UPDATE coupons SET uses = uses + 1 WHERE code=?", (code,)
-    )
-    conn.commit()
-    conn.close()
-
-    return {
-        "success":    True,
-        "message":    f"Coupon redeemed — {duration_str} Pro access activated",
-        "expires_at": expires_at,
-        "tier":       coupon["tier"],
-        "duration":   duration_str,
-    }
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return _json.loads(e.read().decode())
+        except Exception:
+            return {"success": False, "message": f"Server error {e.code}"}
+    except Exception as e:
+        return {"success": False, "message": f"Could not reach SkillGod server: {e}"}
 
 
 def is_valid_redemption(machine_id: str) -> dict:

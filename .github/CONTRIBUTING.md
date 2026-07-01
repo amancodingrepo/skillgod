@@ -98,7 +98,7 @@ Set new community skills to `0.75`. Don't go above `0.85` unless it's been valid
 vault_free/          ← 30 free skills (flat, no subdirs)
 ```
 
-The full vault (1,944 skills) is in the Pro tier and not in this repo. Community contributions to `vault_free/` are welcome — open a PR adding your `.md` file directly to `vault_free/`.
+The full vault (1,927 skills) is in the Pro tier and not in this repo. Community contributions to `vault_free/` are welcome — open a PR adding your `.md` file directly to `vault_free/`.
 
 ---
 

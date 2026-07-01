@@ -46,7 +46,7 @@ func runFind(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("skills engine error: %w", err)
 	}
 
-	total, ms := "1,944", "12"
+	total, ms := "1,927", "12"
 	type result struct{ score, name, why, desc string }
 	var results []result
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {

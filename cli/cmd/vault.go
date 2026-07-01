@@ -83,7 +83,7 @@ func runVault(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %-20s %s\n", "Tier:", yellow("free"))
 		fmt.Printf("  %-20s %s\n", "Encrypted vault:", dim("none"))
 		fmt.Println()
-		fmt.Println(dim("  Upgrade to Pro for 1,944+ skills: sg sync --key <YOUR_KEY>"))
+		fmt.Println(dim("  Upgrade to Pro for 1,927+ skills: sg sync --key <YOUR_KEY>"))
 	}
 
 	return nil

@@ -24,7 +24,7 @@ var syncCmd = &cobra.Command{
 	Long: `Sync your skill vault.
 
 Free tier:  sg sync                          (indexes local vault, 30 starter skills)
-Pro tier:   sg sync --key YOUR_LICENSE_KEY   (decrypts full vault, 1,944 skills active)`,
+Pro tier:   sg sync --key YOUR_LICENSE_KEY   (decrypts full vault, 1,927 skills active)`,
 	RunE: runSync,
 }
 
@@ -46,7 +46,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	if licenseKey == "" {
 		// Free tier — index local vault
 		fmt.Println(bold("Syncing free tier (30 starter skills)..."))
-		fmt.Println(yellow("Upgrade to Pro for 1,944+ skills: skillgod.dev"))
+		fmt.Println(yellow("Upgrade to Pro for 1,927+ skills: skillgod.dev"))
 		out, _ := runPython(sgRoot, "from skills import rebuild_index; print(rebuild_index())")
 		fmt.Printf("Index updated: %s skills\n", green(strings.TrimSpace(out)))
 		return nil

@@ -293,7 +293,7 @@ func buildCopilotInstructions(sgRoot string) string {
 
 ## What SkillGod Does
 
-SkillGod injects 1,944 curated skills and project memory into every AI coding session.
+SkillGod injects 1,927 curated skills and project memory into every AI coding session.
 These instructions are the static fallback for GitHub Copilot (which does not support MCP).
 For full live injection, use Claude Code or Cursor with sg init.
 
@@ -313,7 +313,7 @@ Key decisions from previous sessions will be injected at session start when usin
 
 ## Skill Vault
 
-This project has access to 1,944 curated skills across:
+This project has access to 1,927 curated skills across:
 - coding/ — Python, TypeScript, React, debugging, code review
 - design/ — UI/UX, layout, Figma, brutalist patterns
 - devops/ — Docker, Railway, Vercel, CI/CD
@@ -336,7 +336,7 @@ func writeContinueConfig(sgRoot, configPath string) error {
 
 	// SkillGod system message for Ollama sessions
 	systemMsg := `You are working with SkillGod active. SkillGod provides:
-- 1,944 curated coding skills injected based on task relevance
+- 1,927 curated coding skills injected based on task relevance
 - Persistent memory of project decisions, patterns, and errors
 - Security scanning on all inputs
 
