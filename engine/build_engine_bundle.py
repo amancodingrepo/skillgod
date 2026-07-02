@@ -16,7 +16,7 @@ What goes in (free tier only):
   db/.gitkeep        — empty dir so the SQLite layer has somewhere to write
   VERSION            — bundle version marker
 
-The Pro vault (full 1,900+ encrypted skills) is delivered separately via
+The Pro vault (full 1,927 encrypted skills) is delivered separately via
 `sg sync` and build_vault_release.py — never in this bundle.
 
 Usage:

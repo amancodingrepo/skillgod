@@ -34,7 +34,7 @@ import sqlite3
 
 _UPGRADE_PROMPT = (
     "\n\n[SkillGod Free — 30 skills active. "
-    "Upgrade for 1,945 skills: skillgod.dev/pricing]"
+    "Upgrade for 1,927 skills: skillgod.dev/pricing]"
 )
 
 

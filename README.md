@@ -24,7 +24,7 @@ Every session starts cold. SkillGod fixes that.
 
 | | Without SkillGod | With SkillGod |
 |---|---|---|
-| Context per prompt | 0 | 3 scored skills + 32 instincts |
+| Context per prompt | 0 | 3 scored skills + 31 instincts |
 | Memory across sessions | Cold start every time | SQLite per project |
 | Agent routing | One model, one task | 10 specialist agents, each with own skills |
 | Vault | — | 1,927 skills |
@@ -47,7 +47,7 @@ Your prompt
 ┌──────────────────────────────────────────────┐
 │  Pillar 1 — Skills                           │
 │  Score 1,927 skills against your task        │
-│  Inject top 3 + all 32 instincts             │
+│  Inject top 3 + all 31 instincts             │
 │  (instincts fire every single prompt)        │
 └──────────────────────────────────────────────┘
     │

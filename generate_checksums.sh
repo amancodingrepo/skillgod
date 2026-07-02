@@ -36,8 +36,13 @@ if (( ${#missing[@]} > 0 )); then
 fi
 
 # Prefer sha256sum (Linux); fall back to shasum -a 256 (macOS).
+# --text forces the two-space "<hash>  <filename>" format install.sh's
+# `grep " ${BINARY}\$"` expects. Without it, sha256sum on some platforms
+# (observed: Windows Git Bash) defaults to binary mode and emits
+# "<hash> *<filename>" instead — a format the installer's grep never
+# matches, silently failing checksum verification for every download.
 if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "${BINARIES[@]}" > "$OUT"
+  sha256sum --text "${BINARIES[@]}" > "$OUT"
 elif command -v shasum >/dev/null 2>&1; then
   shasum -a 256 "${BINARIES[@]}" > "$OUT"
 else
