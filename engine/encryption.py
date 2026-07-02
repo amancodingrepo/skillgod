@@ -278,6 +278,20 @@ def sync_encrypted_vault(license_key: str, machine_id: str = "") -> int:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
         written += 1
+
+    # A successful local decrypt is the only signal `sg sync --key` produces on
+    # the primary path (verify_key succeeding short-circuits the network
+    # validate_key() call that would otherwise set these). Without this,
+    # get_license_tier()/is_pro_active() have nothing to read afterward and
+    # every subsequent session falls back to the free tier despite the vault
+    # having decrypted correctly.
+    try:
+        from license import save_key, set_kv
+        save_key(license_key)
+        set_kv("license_status", "pro")
+    except Exception:
+        pass
+
     return written
 
 

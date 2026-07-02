@@ -31,6 +31,42 @@ SCORE_THRESHOLD = 0.18
 TOP_K_DEFAULT   = 3
 
 
+def get_license_tier() -> str:
+    """
+    Return 'pro' or 'free' from the local kv store (set by session_start.py's
+    online check). No network call; falls back to 'free' if the key is missing.
+    """
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        row = conn.execute(
+            "SELECT value FROM kv WHERE key='license_status'"
+        ).fetchone()
+        conn.close()
+        return row[0] if row and row[0] == "pro" else "free"
+    except Exception:
+        return "free"
+
+
+def get_active_skill_count() -> int:
+    """
+    Number of skills actually available to score for THIS install's tier.
+    Pro  → full vault/ skill count. Free → vault_free/ skill count.
+    Counts files on disk (the DB indexes vault/ only), so it matches exactly
+    what find_skills() scores against via _get_active_vault_dir().
+    """
+    active = _get_active_vault_dir()
+    if not active.exists():
+        return 0
+    return sum(1 for _ in active.rglob("*.md"))
+
+
+def get_full_vault_count() -> int:
+    """Total unique skill files in the full vault/ (all tiers)."""
+    if not VAULT_DIR.exists():
+        return 0
+    return sum(1 for _ in VAULT_DIR.rglob("*.md"))
+
+
 def _get_active_vault_dir() -> Path:
     """
     Return vault_free/ for free users, vault/ for Pro users.
@@ -204,8 +240,20 @@ def find_skills(task: str, top_k: int = TOP_K_DEFAULT) -> list[dict]:
             sk["matched"] = reasons  # why this skill fired — shown in sg find
             scored.append(sk)
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
+    # Dedup by skill name: ingestion produces many same-named files (some are
+    # stale copies of each other), so a single logical skill can score multiple
+    # times and both flood the results and waste the top-k injection budget.
+    # Keep only the highest-scoring instance per name.
+    best_by_name: dict[str, dict] = {}
+    for sk in scored:
+        key      = (sk.get("name") or sk.get("id") or sk["path"]).strip().lower()
+        existing = best_by_name.get(key)
+        if existing is None or sk["score"] > existing["score"]:
+            best_by_name[key] = sk
+
+    deduped = list(best_by_name.values())
+    deduped.sort(key=lambda x: x["score"], reverse=True)
+    return deduped[:top_k]
 
 
 def load_instincts() -> str:
@@ -347,6 +395,7 @@ def rebuild_index() -> int:
     conn.commit()
 
     count = 0
+    seen_paths: list[str] = []
     for md in VAULT_DIR.rglob("*.md"):
         sk = _load_skill_file(md)
         if not sk:
@@ -371,7 +420,17 @@ def rebuild_index() -> int:
                 sk["lib_id"],
             )
         )
+        seen_paths.append(sk["path"])
         count += 1
+
+    # Prune rows for skill files that no longer exist. INSERT OR REPLACE only
+    # upserts; without this, deleting a vault file leaves an orphan index row
+    # (phantom skill) that a release built from this index would ship.
+    seen = set(seen_paths)
+    existing = [r[0] for r in conn.execute("SELECT path FROM skills").fetchall()]
+    for p in existing:
+        if p not in seen:
+            conn.execute("DELETE FROM skills WHERE path = ?", (p,))
 
     conn.commit()
     conn.close()
