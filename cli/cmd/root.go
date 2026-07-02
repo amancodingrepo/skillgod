@@ -37,4 +37,5 @@ func init() {
 	rootCmd.AddCommand(buildCmd)
 	rootCmd.AddCommand(signalsCmd)
 	rootCmd.AddCommand(promoteCmd)
+	rootCmd.AddCommand(updateCmd)
 }

@@ -19,7 +19,8 @@ AGENT_TYPES = {
     "frontend":      ["ui", "ux", "react", "css", "html", "component",
                       "layout", "design", "responsive", "animation"],
     "backend":       ["api", "database", "server", "auth", "endpoint",
-                      "rest", "graphql", "sql", "python", "node"],
+                      "rest", "graphql", "sql", "python", "node",
+                      "payment", "checkout", "billing", "webhook"],
     "devops":        ["deploy", "docker", "ci", "cd", "kubernetes",
                       "terraform", "aws", "pipeline", "infrastructure"],
     "security":      ["security", "audit", "vulnerability", "injection",
@@ -65,8 +66,15 @@ def detect_agent_type(task: str) -> str:
     scores = {}
     for agent, keywords in AGENT_TYPES.items():
         scores[agent] = sum(1 for kw in keywords if kw in task_lower)
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "backend"
+    top = max(scores.values())
+    if top == 0:
+        return "backend"
+    tied = [agent for agent, s in scores.items() if s == top]
+    # "test" wins ties: a task mentioning test/testing keywords alongside an
+    # equal count of e.g. frontend keywords ("unit tests for a react
+    # component") is test work first, regardless of what's under test.
+    # Otherwise fall back to AGENT_TYPES iteration order (first max found).
+    return "test" if "test" in tied else tied[0]
 
 
 def decompose_task(task: str) -> list[dict]:
@@ -84,7 +92,8 @@ def decompose_task(task: str) -> list[dict]:
                           "design", "component", "layout", "form"])
     needs_backend  = any(w in task_lower for w in
                          ["api", "endpoint", "database", "backend", "server",
-                          "auth", "login", "register", "save", "store"])
+                          "auth", "login", "register", "save", "store",
+                          "payment", "checkout", "billing", "webhook", "email"])
     needs_test     = any(w in task_lower for w in
                          ["test", "testing", "e2e", "coverage", "spec"])
     needs_docs     = any(w in task_lower for w in
