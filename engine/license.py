@@ -49,6 +49,9 @@ DEFAULT_TTL_DAYS = 30
 # Machine ID
 # ---------------------------------------------------------------------------
 
+_MACHINE_ID_CACHE: str | None = None
+
+
 def get_machine_id() -> str:
     """
     Returns a stable, hardware-based machine identifier.
@@ -58,10 +61,18 @@ def get_machine_id() -> str:
     Linux   : /etc/machine-id or /var/lib/dbus/machine-id
 
     Falls back to a hostname+platform hash if the above fail.
+
+    Memoized per-process: this is called on every find_skills() invocation
+    (via _get_active_vault_dir() -> is_pro_active()), and _raw_machine_id()
+    shells out to wmic on Windows (~100ms+ uncached) — the machine's identity
+    can't change mid-process, so there's no correctness cost to caching it.
     """
-    raw = _raw_machine_id()
-    # Always return a 32-char hex digest — consistent, never exposes raw UUID
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+    global _MACHINE_ID_CACHE
+    if _MACHINE_ID_CACHE is None:
+        raw = _raw_machine_id()
+        # Always return a 32-char hex digest — consistent, never exposes raw UUID
+        _MACHINE_ID_CACHE = hashlib.sha256(raw.encode()).hexdigest()[:32]
+    return _MACHINE_ID_CACHE
 
 
 def _raw_machine_id() -> str:
