@@ -511,19 +511,42 @@ def downgrade_to_free() -> bool:
     from the local SQLite skill index (keeps instincts + vault_free skills) and
     marks license_status='free' in the kv store. Does NOT delete the encrypted
     .sg files on disk — a later renewal just re-indexes them.
+
+    Fails loud, not silent: this is the security/billing boundary that keeps
+    an expired Pro user off the full paid vault, so a broken DELETE here must
+    surface as a failure, never as a swallowed exception. Only returns True
+    once a COUNT query confirms zero Pro skills remain in the index.
     """
     db_path = get_local_db_path()
     try:
         conn = sqlite3.connect(db_path)
-        try:
+
+        has_skills_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='skills'"
+        ).fetchone() is not None
+
+        if has_skills_table:
+            # Column names must match the schema in skills.py's rebuild_index()
+            # (path, skill_type) — NOT source_path/type, which don't exist and
+            # previously made this DELETE a silent no-op.
             conn.execute("""
                 DELETE FROM skills
-                WHERE source_path NOT LIKE '%vault_free%'
-                  AND type != 'instinct'
+                WHERE path NOT LIKE '%vault_free%'
+                  AND skill_type != 'instinct'
             """)
-        except Exception:
-            # skills table may not exist yet on a fresh install — non-fatal.
-            pass
+            remaining = conn.execute("""
+                SELECT COUNT(*) FROM skills
+                WHERE path NOT LIKE '%vault_free%'
+                  AND skill_type != 'instinct'
+            """).fetchone()[0]
+            if remaining > 0:
+                print(f"[license] downgrade_to_free incomplete: "
+                      f"{remaining} Pro skill(s) still in index", file=sys.stderr)
+                conn.close()
+                return False
+        # else: skills table doesn't exist yet (fresh install) — nothing to
+        # remove, fall through and just mark the tier as free.
+
         _ensure_kv_table(conn)
         conn.execute(
             "INSERT INTO kv (key, value) VALUES ('license_status', 'free') "
@@ -533,7 +556,7 @@ def downgrade_to_free() -> bool:
         conn.close()
         return True
     except Exception as e:
-        print(f"[license] downgrade_to_free error: {e}")
+        print(f"[license] downgrade_to_free failed: {e}", file=sys.stderr)
         return False
 
 
