@@ -10,8 +10,81 @@ Never disable this. It protects the product and the user.
 
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
+
+# BUG-020 FIX — homoglyph fold. A minimal Cyrillic/Greek→Latin map covering the
+# letters that spell the trigger words below, so `іgnore` / `іgnоre` (Cyrillic)
+# normalises to `ignore` before matching. NFKC alone doesn't fold these.
+_HOMOGLYPHS = {
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y",
+    "і": "i", "ѕ": "s", "ԁ": "d", "ո": "n", "ⅼ": "l", "ɡ": "g", "ν": "v",
+    "α": "a", "ε": "e", "ο": "o", "ρ": "p", "τ": "t", "κ": "k", "ι": "i",
+}
+
+# Zero-width / bidi / joiner characters attackers insert between letters to
+# defeat exact-match regex (ZWSP, ZWNJ, ZWJ, LRO/RLO/PDF, BOM, word-joiner).
+_ZERO_WIDTH = dict.fromkeys(
+    [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C,
+     0x202D, 0x202E, 0x2060, 0x2061, 0x2062, 0x2063, 0xFEFF], None
+)
+
+
+def _normalize_for_scan(text: str) -> str:
+    """
+    Canonicalise input before pattern matching so obfuscation can't trivially
+    bypass the regex layer: strip zero-width / bidi characters, NFKC-normalise,
+    fold common homoglyphs to Latin, lowercase. Word boundaries are preserved so
+    the existing space-aware INJECTION_PATTERNS still match. The original text is
+    what actually runs downstream; this surface only DECIDES whether to block.
+    """
+    if not text:
+        return ""
+    text = text.translate(_ZERO_WIDTH)
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(_HOMOGLYPHS.get(ch, ch) for ch in text)
+    return text.lower()
+
+
+# BUG-020 FIX — compact signatures matched against an alphanumeric-only surface
+# (all spaces/dots/hyphens removed), catching letter-spacing obfuscation like
+# `i.g.n.o.r.e p-r-e-v-i-o-u-s` or `i g n o r e   a l l` that the space-aware
+# regexes miss. Each is the trigger phrase with separators stripped.
+_COMPACT_SIGNATURES = [
+    ("ignoreprevious",       "ignore-previous"),
+    ("ignoreall",            "ignore-all"),
+    ("ignoreabove",          "ignore-previous"),
+    ("disregardprevious",    "disregard-instructions"),
+    ("disregardall",         "disregard-instructions"),
+    ("disregardyour",        "disregard-instructions"),
+    ("forgetyourinstruct",   "forget-instructions"),
+    ("forgetinstruct",       "forget-instructions"),
+    ("forgetyourrules",      "forget-instructions"),
+    ("jailbreak",            "jailbreak"),
+    ("dan mode".replace(" ", ""), "dan-mode"),
+    ("developermode",        "privileged-mode-jailbreak"),
+    ("sudomode",             "privileged-mode-jailbreak"),
+    ("godmode",              "privileged-mode-jailbreak"),
+    # BUG-037 FIX — bare "systemprompt" blocked every legitimate mention of
+    # "system prompt" (e.g. "design a system prompt template for my chatbot").
+    # Only flag when a leak verb or possessive is attached, mirroring the
+    # spaced prompt-leak regex above.
+    ("yoursystemprompt",     "prompt-leak"),
+    ("revealsystemprompt",   "prompt-leak"),
+    ("showsystemprompt",     "prompt-leak"),
+    ("printsystemprompt",    "prompt-leak"),
+    ("outputsystemprompt",   "prompt-leak"),
+    ("repeatsystemprompt",   "prompt-leak"),
+    ("dumpsystemprompt",     "prompt-leak"),
+    ("leaksystemprompt",     "prompt-leak"),
+    ("newpersona",           "new-persona"),
+    ("actasunrestricted",    "act-as-jailbreak"),
+    ("actasjailbroken",      "act-as-jailbreak"),
+    ("bypasssafety",         "safety-bypass"),
+    ("overridesafety",       "safety-override"),
+    ("disablesafety",        "disable-safety"),
+]
 
 # ---------------------------------------------------------------------------
 # Injection patterns (from CLAUDE.md spec + AgentShield)
@@ -48,7 +121,7 @@ INJECTION_PATTERNS = [
     (r"<s>",              "token-injection-bos"),
 
     # Prompt leaking
-    (r"(reveal|show|print|output|repeat|tell me)\s+(your\s+)?(system\s+prompt|instructions?|context|initial prompt)",
+    (r"(reveal|show|print|output|repeat|tell me|give me|dump|leak)\s+(me\s+)?(your\s+)?(system\s+prompt|instructions?|context|initial prompt)",
      "prompt-leak"),
     (r"what\s+(are\s+)?your\s+(instructions?|rules?|system\s+prompt)",
      "prompt-leak-query"),
@@ -86,9 +159,14 @@ def security_scan(text: str) -> list[dict]:
     if not text or not isinstance(text, str):
         return []
 
+    # BUG-020 FIX — match against a normalised surface (zero-width/bidi stripped,
+    # NFKC, homoglyphs folded) so obfuscated triggers can't slip past the regex.
+    scan_surface = _normalize_for_scan(text)
+
     threats = []
+    seen = set()
     for regex, name in _COMPILED:
-        m = regex.search(text)
+        m = regex.search(scan_surface)
         if m:
             threats.append({
                 "pattern":  name,
@@ -96,6 +174,20 @@ def security_scan(text: str) -> list[dict]:
                 "severity": "high",
                 "offset":   m.start(),
             })
+            seen.add(name)
+
+    # Compact pass: strip ALL non-alphanumerics and look for concatenated
+    # signatures (defeats letter-spacing: "i.g.n.o.r.e p-r-e-v-i-o-u-s").
+    compact = re.sub(r"[^a-z0-9]+", "", scan_surface)
+    for sig, name in _COMPACT_SIGNATURES:
+        if sig in compact and name not in seen:
+            threats.append({
+                "pattern":  name,
+                "match":    sig,
+                "severity": "high",
+                "offset":   compact.find(sig),
+            })
+            seen.add(name)
 
     if threats:
         _log_threats(text[:200], threats)

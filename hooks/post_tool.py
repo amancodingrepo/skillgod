@@ -38,9 +38,10 @@ def run(hook_input: dict) -> None:
     session_id  = hook_input.get("session_id", "unknown")
     active_skills = hook_input.get("active_skills", [])
 
-    # Detect rework signals
-    combined     = f"{task} {output}".lower()
-    rework_count = count_rework_signals(combined)
+    # Detect rework signals — BUG-039 FIX: scan only the USER's task text.
+    # The AI's own output routinely says "instead"/"actually", which counted
+    # as rework and unfairly dinged the active skills' quality scores.
+    rework_count = count_rework_signals(task.lower())
 
     # Record signal for each active skill
     for sk in active_skills:

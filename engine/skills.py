@@ -80,7 +80,9 @@ def _get_active_vault_dir() -> Path:
                 return VAULT_DIR
             return VAULT_FREE_DIR
         except Exception:
-            pass
+            # BUG-013 FIX — fail CLOSED to the free vault when entitlement can't
+            # be determined, rather than serving the full Pro vault.
+            return VAULT_FREE_DIR
     return VAULT_DIR
 
 
@@ -109,26 +111,55 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, text[end + 4:].strip()
 
 
+def _safe_float(v, default: float) -> float:
+    """BUG-012 FIX — tolerate non-numeric frontmatter (e.g. `confidence: high`)
+    instead of letting float()/int() raise ValueError out of the rglob loop and
+    abort the entire index/scoring run."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_list(v) -> list:
+    """Frontmatter tags/triggers should be lists; a bare string would otherwise
+    be iterated character-by-character during scoring."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.strip():
+        return [v.strip()]
+    return []
+
+
 def _load_skill_file(path: Path) -> dict | None:
+    # BUG-012 FIX — a single malformed skill file must never crash the whole
+    # vault load / rebuild_index; wrap parsing and coerce numeric fields safely.
     try:
         text = path.read_text(encoding="utf-8")
+        meta, body = _parse_frontmatter(text)
+        return {
+            "id":          meta.get("id") or path.stem,
+            "name":        meta.get("name") or path.stem,
+            "description": meta.get("description", "") if isinstance(meta.get("description", ""), str) else "",
+            "tags":        _coerce_list(meta.get("tags")),
+            "triggers":    _coerce_list(meta.get("triggers")),
+            "skill_type":  meta.get("type") or meta.get("skill_type", "skill"),
+            "confidence":  _safe_float(meta.get("confidence", 0.8), 0.8),
+            "uses":        _safe_int(meta.get("uses", 0), 0),
+            "lib_id":      meta.get("lib_id", ""),
+            "source":      meta.get("source", ""),
+            "body":        body,
+            "path":        str(path),
+        }
     except Exception:
         return None
-    meta, body = _parse_frontmatter(text)
-    return {
-        "id":          meta.get("id") or path.stem,
-        "name":        meta.get("name") or path.stem,
-        "description": meta.get("description", ""),
-        "tags":        meta.get("tags") or [],
-        "triggers":    meta.get("triggers") or [],
-        "skill_type":  meta.get("type") or meta.get("skill_type", "skill"),
-        "confidence":  float(meta.get("confidence", 0.8)),
-        "uses":        int(meta.get("uses", 0)),
-        "lib_id":      meta.get("lib_id", ""),
-        "source":      meta.get("source", ""),
-        "body":        body,
-        "path":        str(path),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +192,35 @@ def _fuzzy(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _fuzzy_fast(a: str, b: str, threshold: float = 0.82) -> bool:
+    """PERF FIX (BUG-033) - difflib with cheap gates. The old code ran a full
+    SequenceMatcher.ratio() for every trigger x task-word pair (~700ms/prompt
+    on the full vault). Gate on length delta, first char, and difflib's
+    upper-bound estimators so the expensive ratio() only runs on plausible
+    matches."""
+    if abs(len(a) - len(b)) > 3:
+        return False
+    if a[:1] != b[:1]:
+        return False
+    sm = SequenceMatcher(None, a, b)
+    if sm.real_quick_ratio() <= threshold:
+        return False
+    if sm.quick_ratio() <= threshold:
+        return False
+    return sm.ratio() > threshold
+
+
+def _phrase_match(needle: str, haystack: str, tokens: set) -> bool:
+    """WORD-BOUNDARY FIX (BUG-034) - trigger/tag matching was substring
+    ("check" matched "checkout", injecting grammar skills into payment tasks).
+    Single words must match a whole token; multi-word phrases must sit on word
+    boundaries."""
+    if " " not in needle:
+        return needle in tokens
+    return re.search(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])",
+                     haystack) is not None
+
+
 def _word_overlap(desc: str, task: str) -> float:
     d_words = set(re.findall(r'\b\w{4,}\b', desc.lower()))
     t_words = set(re.findall(r'\b\w{4,}\b', task.lower()))
@@ -178,24 +238,27 @@ def _score_skill(skill: dict, task: str) -> tuple[float, list[str]]:
     """
     task_lower = task.lower()
     task_words = set(re.findall(r'\b\w{3,}\b', task_lower))
+    task_tokens = set(re.findall(r'[a-z0-9]+', task_lower))
     score      = 0.0
     reasons: list[str] = []
 
     for trigger in skill.get("triggers") or []:
         t = trigger.lower()
-        if t in task_lower:
+        if _phrase_match(t, task_lower, task_tokens):
             score   += 0.35
             reasons.append(f'"{trigger}"')
-        elif any(_fuzzy(t, w) > 0.82 for w in task_words):
+        elif " " not in t and any(_fuzzy_fast(t, w) for w in task_words):
             score   += 0.15
             reasons.append(f'~"{trigger}"')
 
     for tag in skill.get("tags") or []:
         t = tag.lower()
-        if t in task_lower:
+        if _phrase_match(t, task_lower, task_tokens):
             score   += 0.20
             reasons.append(f'#{tag}')
-        elif t in task_words:
+        elif " " not in t and len(t) > 3 and any(
+                (w.startswith(t) or t.startswith(w))
+                for w in task_tokens if len(w) > 3):
             score   += 0.08
             reasons.append(f'#{tag}')
 
@@ -224,11 +287,17 @@ def find_skills(task: str, top_k: int = TOP_K_DEFAULT) -> list[dict]:
     Each result includes 'matched': list of trigger/tag/desc reasons that fired.
     Instincts are NOT returned here (use load_instincts() for those).
     """
-    skills = _load_all_skills(include_instincts=False)
-
-    # Fall back to DB if vault is empty
-    if not skills:
+    # PERF FIX (BUG-033) - for the Pro vault, load from the SQLite index (one
+    # query) instead of re-reading and re-parsing all ~1,900 .md files on every
+    # prompt. The index is rebuilt at SessionStart and updated by learn_skill().
+    # Tier boundary preserved (BUG-013): the DB only indexes vault/ (Pro), so
+    # free users always load their own files directly (29 files, fast anyway).
+    if _get_active_vault_dir() == VAULT_DIR:
         skills = _load_from_db()
+        if not skills:
+            skills = _load_all_skills(include_instincts=False)
+    else:
+        skills = _load_all_skills(include_instincts=False)
 
     scored = []
     for sk in skills:
@@ -252,19 +321,36 @@ def find_skills(task: str, top_k: int = TOP_K_DEFAULT) -> list[dict]:
             best_by_name[key] = sk
 
     deduped = list(best_by_name.values())
-    deduped.sort(key=lambda x: x["score"], reverse=True)
+    # BUG-015 FIX — deterministic ordering. Sorting by score alone left ties
+    # resolved by rglob() filesystem order (OS-dependent), so identical prompts
+    # could inject different skills on different machines. Break ties by name.
+    deduped.sort(key=lambda x: (-x["score"], (x.get("name") or x.get("id") or x["path"]).lower()))
     return deduped[:top_k]
 
 
+INSTINCT_MAX_WORDS = 120   # spec says 80; small buffer, hard cap here
+
+
 def load_instincts() -> str:
-    """Load all instinct files. Returns concatenated string for injection."""
-    instincts_dir = VAULT_DIR / "instincts"
+    """Load all instinct files. Returns concatenated string for injection.
+
+    TIER FIX (BUG-035) - reads the ACTIVE vault's instincts/ so free users get
+    the free instincts, not the Pro set and not nothing.
+    SIZE FIX (BUG-036) - skips any instinct whose body exceeds
+    INSTINCT_MAX_WORDS; a mis-filed 2,000-word skill must never ride along on
+    every single prompt."""
+    instincts_dir = _get_active_vault_dir() / "instincts"
     if not instincts_dir.exists():
         return ""
     parts = []
     for md in sorted(instincts_dir.glob("*.md")):
         sk = _load_skill_file(md)
         if sk:
+            if len(sk["body"].split()) > INSTINCT_MAX_WORDS:
+                import sys as _sys
+                print(f"[SkillGod] instinct too long, skipped: {md.name} "
+                      f"(move it to a category vault)", file=_sys.stderr)
+                continue
             parts.append(f"### {sk['name']}\n{sk['body']}")
     if not parts:
         return ""
@@ -338,7 +424,7 @@ def learn_skill(task: str, output: str,
 
     slug = re.sub(r"[^a-z0-9]+", "-", task.lower()[:50]).strip("-")
     name = task[:80].strip()
-    desc = f"Use when {task[:120].lower().rstrip('.')}"
+    desc = f"Use when asked to {task[:120].lower().rstrip('.')}"
 
     # Extract tags from output words
     common = re.findall(r'\b[a-z]{4,}\b', output.lower())
@@ -368,7 +454,30 @@ def learn_skill(task: str, output: str,
     meta_dir.mkdir(parents=True, exist_ok=True)
     dest = meta_dir / f"{slug}.md"
     dest.write_text(frontmatter + output, encoding="utf-8")
+    _index_skill_file(dest)   # keep the SQLite index in sync (PERF FIX path)
     return dest
+
+
+def _index_skill_file(path: Path) -> None:
+    """Upsert a single skill file into the SQLite index (best-effort)."""
+    sk = _load_skill_file(path)
+    if not sk:
+        return
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute(
+            "INSERT OR REPLACE INTO skills "
+            "(id, path, name, description, tags, triggers, skill_type, "
+            "confidence, uses, created_at, body, lib_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sk["id"], sk["path"], sk["name"], sk["description"],
+             json.dumps(sk["tags"]), json.dumps(sk["triggers"]),
+             sk["skill_type"], sk["confidence"], sk["uses"],
+             datetime.now().isoformat(), sk["body"], sk["lib_id"]))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # SessionStart rebuild will catch up
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +525,7 @@ def rebuild_index() -> int:
                 sk["confidence"],
                 sk["uses"],
                 datetime.now().isoformat(),
-                sk["body"][:2000],
+                sk["body"],
                 sk["lib_id"],
             )
         )
@@ -481,6 +590,7 @@ def stocktake() -> str:
     good_desc     = []      # proper "Use when <condition>" descriptions
     missing_tags  = []
     low_conf      = []
+    fat_instincts = []   # instincts violating the 80-word body cap
     by_type       = {}
     by_cat        = {}
 
@@ -507,6 +617,9 @@ def stocktake() -> str:
 
         if sk.get("confidence", 1.0) < 0.5:
             low_conf.append(sk["name"])
+
+        if t == "instinct" and len(sk.get("body", "").split()) > 80:
+            fat_instincts.append(sk["name"])
 
     # Description quality score (0–100)
     non_instinct = len([s for s in all_skills if s["skill_type"] != "instinct"])
@@ -553,7 +666,13 @@ def stocktake() -> str:
     if low_conf:
         lines += ["", f"[!] {len(low_conf)} skills with confidence < 0.5 (review or discard)"]
 
-    if not bad_desc and not missing_tags and not low_conf and not fallback_desc:
+    if fat_instincts:
+        lines += ["", f"[!] {len(fat_instincts)} instincts exceed the 80-word body cap "
+                      f"(move to a category vault):"]
+        lines += [f"   - {n}" for n in fat_instincts[:15]]
+
+    if (not bad_desc and not missing_tags and not low_conf
+            and not fallback_desc and not fat_instincts):
         lines.append("\n[ok] Vault looks healthy!")
 
     return "\n".join(lines)

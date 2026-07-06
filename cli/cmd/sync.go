@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,7 +170,11 @@ func fetchVaultFromServer(sgRoot, key string, green, yellow func(...interface{})
 		apiURL = "https://api.skillgod.dev"
 	}
 
-	mid, _ := runPython(sgRoot, "from encryption import get_machine_id; print(get_machine_id())")
+	// BUG-009 FIX — send the CANONICAL (hashed) machine id, matching what license
+	// validation stores in pro_licenses.machine_id. Previously this used
+	// encryption.get_machine_id() (the RAW id), so the vault endpoints bound a
+	// different identity than validation expected.
+	mid, _ := runPython(sgRoot, "from license import get_canonical_machine_id; print(get_canonical_machine_id())")
 	iid, _ := runPython(sgRoot, "from license import get_install_id; print(get_install_id())")
 	mid = strings.TrimSpace(mid)
 	iid = strings.TrimSpace(iid)
@@ -234,7 +240,8 @@ func fetchVaultFromR2(sgRoot, key string, green, yellow func(...interface{}) str
 		apiURL = "https://api.skillgod.dev"
 	}
 
-	mid, _ := runPython(sgRoot, "from encryption import get_machine_id; print(get_machine_id())")
+	// BUG-009 FIX — canonical (hashed) machine id, see fetchVaultFromServer.
+	mid, _ := runPython(sgRoot, "from license import get_canonical_machine_id; print(get_canonical_machine_id())")
 	mid = strings.TrimSpace(mid)
 	if mid == "" {
 		return false
@@ -260,6 +267,7 @@ func fetchVaultFromR2(sgRoot, key string, green, yellow func(...interface{}) str
 		URL               string `json:"url"`
 		Version           string `json:"version"`
 		WrappedReleaseKey string `json:"wrapped_release_key"`
+		Sha256            string `json:"sha256"`
 	}
 	derr := json.NewDecoder(resp.Body).Decode(&meta)
 	resp.Body.Close()
@@ -267,7 +275,7 @@ func fetchVaultFromR2(sgRoot, key string, green, yellow func(...interface{}) str
 		return false // no zip/key available — fall back to per-machine fetch
 	}
 
-	// 2. Download the zip straight from R2.
+	// 2. Download the zip straight from R2, hashing it as it streams in.
 	zresp, err := (&http.Client{Timeout: 180 * time.Second}).Get(meta.URL)
 	if err != nil || zresp.StatusCode != 200 {
 		if zresp != nil {
@@ -284,11 +292,23 @@ func fetchVaultFromR2(sgRoot, key string, green, yellow func(...interface{}) str
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, zresp.Body); err != nil {
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, hasher), zresp.Body); err != nil {
 		tmp.Close()
 		return false
 	}
 	tmp.Close()
+
+	// BUG-029 — verify the zip's SHA256 BEFORE handing it to the decryptor. A
+	// corrupted/truncated R2 object otherwise surfaces as a cryptic decryption
+	// error; this gives a clear, actionable message and avoids a bad install.
+	if meta.Sha256 != "" {
+		got := hex.EncodeToString(hasher.Sum(nil))
+		if !strings.EqualFold(got, meta.Sha256) {
+			fmt.Printf("  %s Vault download corrupted (checksum mismatch) — please retry: sg sync --key YOUR_KEY\n", yellow("[ERROR]"))
+			return false
+		}
+	}
 
 	// 3. Hand the zip + wrapped key to the engine: unwrap K_rel, decrypt, and
 	//    re-encrypt under this machine's key into vault_encrypted/.

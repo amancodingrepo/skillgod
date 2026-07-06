@@ -224,10 +224,19 @@ class RalphLoop:
         self.iterations += 1
         if self.iterations >= self.max_iterations:
             return True  # circuit breaker
+
+        # BUG-031 FIX — detect a stuck agent that emits the same output twice in
+        # a row and stop early, instead of burning all remaining iterations
+        # waiting for the hard cap. Compares against the last recorded output.
+        norm = " ".join((output or "").split())[:200]
+        if self.history and self.history[-1].get("output") == norm:
+            return True
+
         return not should_continue_loop(output, task)
 
     def record(self, task: str, output: str) -> None:
-        self.history.append({"task": task, "output": output[:200],
+        self.history.append({"task": task,
+                             "output": " ".join((output or "").split())[:200],
                              "iteration": self.iterations})
 
 
@@ -255,7 +264,13 @@ class SkillGodSwarm:
         subtasks = decompose_task(task)
         agents   = []
         for s in subtasks:
-            skills  = get_skills_for_agent(s["agent_type"], s["task"])
+            # BUG-020-link FIX — a skill-scoring error must not abort the whole
+            # swarm before any agent runs; degrade to no skills for that agent.
+            try:
+                skills = get_skills_for_agent(s["agent_type"], s["task"])
+            except Exception as e:
+                print(f"[swarm] skill scoring failed for {s['agent_type']}: {e}")
+                skills = []
             agents.append(AgentTask(
                 id         = s["id"],
                 task       = s["task"],

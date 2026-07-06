@@ -39,8 +39,18 @@ from runtime import get_runtime          # noqa: E402
 from security import security_scan       # noqa: E402
 
 
+def _derive_project_id() -> str:
+    """Collision-resistant project id (BUG-016). Falls back to the folder name
+    if the memory helper can't be imported for any reason."""
+    try:
+        from memory import derive_project_id
+        return derive_project_id()
+    except Exception:
+        return Path.cwd().name
+
+
 def _extract_task(data: dict) -> str:
-    """Pull the most useful task description from tool input."""
+    """Pull the most useful task description from tool input (for skill scoring)."""
     tool_input = data.get("tool_input", {})
     # Prefer explicit task key
     for key in ("task", "prompt", "query", "description", "command"):
@@ -53,30 +63,58 @@ def _extract_task(data: dict) -> str:
     return data.get("tool_name", "")
 
 
+def _collect_scan_text(obj, _depth: int = 0) -> str:
+    """
+    BUG-021 FIX — the security scan must see EVERY string in the payload, not
+    just the one field _extract_task() picks. Recursively concatenate all string
+    values (bounded depth) so an injection hidden in a non-preferred field is
+    still scanned.
+    """
+    if _depth > 6:
+        return ""
+    parts = []
+    if isinstance(obj, str):
+        parts.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            parts.append(_collect_scan_text(v, _depth + 1))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            parts.append(_collect_scan_text(v, _depth + 1))
+    return "\n".join(p for p in parts if p)
+
+
 def main() -> None:
-    try:
-        raw = sys.stdin.read(8192)
-        data = json.loads(raw) if raw.strip() else {}
-    except Exception:
+    # BUG-021 FIX — read the FULL stdin (was capped at 8192 bytes, so any payload
+    # larger than 8KB truncated → JSON parse failed → the old code fell through
+    # to exit(0), letting the tool call through completely unscanned). Read it
+    # all, and if a non-empty payload fails to parse, fail CLOSED (exit 2).
+    raw = sys.stdin.read()
+    if raw.strip():
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            sys.stderr.write(f"[skillgod] BLOCKED: unparseable hook input ({e}) — failing closed\n")
+            sys.exit(2)
+    else:
         data = {}
 
     task = _extract_task(data)
-    if not task:
-        sys.exit(0)
 
     project = (
         data.get("project")
         or os.environ.get("SKILLGOD_PROJECT")
-        or Path.cwd().name
+        or _derive_project_id()   # BUG-016 FIX — git-remote/path, not bare folder name
     )
     session_id = data.get("session_id", "")
 
-    # --- Security gate: must fail CLOSED. Any exception here blocks the
-    # tool call (exit 2) rather than letting it through unscanned. This is
+    # --- Security gate: must fail CLOSED. Scan the ENTIRE payload (every string
+    # field), not just the extracted task, and block on any exception. This is
     # the step the old code accidentally let fall through a catch-all
     # try/except that just printed a warning and exited 0.
     try:
-        threats = security_scan(task)
+        scan_text = _collect_scan_text(data.get("tool_input", data)) or task
+        threats = security_scan(scan_text)
     except Exception as e:
         sys.stderr.write(f"[skillgod] BLOCKED: security scan failed ({e}) — failing closed\n")
         sys.exit(2)
@@ -84,6 +122,11 @@ def main() -> None:
     if threats:
         sys.stderr.write("[skillgod] BLOCKED: injection attempt detected\n")
         sys.exit(2)
+
+    # Nothing to score/inject if there's no task text — but only AFTER the
+    # security gate above has run on the full payload.
+    if not task:
+        sys.exit(0)
 
     # --- Skill injection / memory attach: may fail gracefully. A hiccup
     # building the augmented context (skills, memory) should not block the

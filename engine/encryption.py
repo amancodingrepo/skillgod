@@ -71,43 +71,23 @@ def _derive_key(license_key: str, machine_id: str) -> bytes:
 
 def get_machine_id() -> str:
     """
-    Return a stable hardware-based machine identifier.
-    Windows: wmic csproduct get UUID
-    Mac:     ioreg -rd1 -c IOPlatformExpertDevice
-    Linux:   /etc/machine-id
+    BUG-009 FIX — delegates to the ONE canonical machine-id function in
+    license.py (sha256(raw)[:32]). This module used to return the RAW, unhashed
+    id, which differed from what license validation sent to the server, splitting
+    a single machine into two identities across endpoints. All vault
+    encrypt/decrypt and the CLI's X-Machine-Id now use the same canonical value.
+
+    Kept as a thin wrapper (not deleted) so existing callers
+    `from encryption import get_machine_id` keep working. Falls back to a local
+    hostname hash only if license.py can't be imported (should never happen in a
+    real install, since encryption and license ship together).
     """
-    import platform
-    import subprocess
-
-    system = platform.system()
     try:
-        if system == "Windows":
-            out = subprocess.check_output(
-                ["wmic", "csproduct", "get", "UUID"],
-                stderr=subprocess.DEVNULL, timeout=5
-            ).decode().strip().splitlines()
-            for line in out:
-                line = line.strip()
-                if line and line != "UUID" and "-" in line:
-                    return line
-        elif system == "Darwin":
-            out = subprocess.check_output(
-                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                stderr=subprocess.DEVNULL, timeout=5
-            ).decode()
-            for line in out.splitlines():
-                if "IOPlatformUUID" in line:
-                    return line.split('"')[-2]
-        else:  # Linux
-            mid = Path("/etc/machine-id")
-            if mid.exists():
-                return mid.read_text().strip()
+        from license import get_canonical_machine_id
+        return get_canonical_machine_id()
     except Exception:
-        pass
-
-    # Fallback: hostname hash
-    import socket
-    return hashlib.sha256(socket.gethostname().encode()).hexdigest()[:32]
+        import socket
+        return hashlib.sha256(socket.gethostname().encode()).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------------------

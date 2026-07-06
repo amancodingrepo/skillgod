@@ -264,13 +264,30 @@ def get_pending_signals() -> list[dict]:
 def flush_signals() -> int:
     """
     Send buffered signals to Railway API.
-    Noop if SKILLGOD_API env var is not set (local-only mode).
+    Noop if SKILLGOD_API env var is not set (local-only mode) or if the user
+    has not opted in.
     Returns count of signals flushed.
+
+    PRIVACY FIX (BUG-038) — the payload previously included machine_id (a
+    hardware-derived identifier) and per-row session_id, contradicting the
+    "anonymous, no identifying details" promise. It also used the wrong key:
+    the server reads install_id, so machine_id payloads were silently rejected.
+    Now sends ONLY what /v1/signals ingests: install_id (random per-install
+    UUID, required for abuse protection) + skill_id, skill_name, kind, score,
+    date per signal. No session ids, no hardware ids, no content.
     """
     import urllib.request
     api_url = os.environ.get("SKILLGOD_API", "").rstrip("/")
     if not api_url:
         return 0  # local-only mode
+    if not is_enabled():
+        return 0  # opt-in gate — buffered rows stay local until user opts in
+
+    try:
+        from license import get_install_id
+        install_id = get_install_id()
+    except Exception:
+        return 0  # can't identify install anonymously — don't send anything
 
     conn = _get_db()
     rows = conn.execute(
@@ -284,8 +301,17 @@ def flush_signals() -> int:
         return 0
 
     payload = json.dumps({
-        "signals": [dict(r) for r in rows],
-        "machine_id": os.environ.get("SKILLGOD_MACHINE_ID", ""),
+        "install_id": install_id,
+        "signals": [
+            {
+                "skill_id":   r["skill_id"],
+                "skill_name": r["skill_name"],
+                "kind":       r["kind"],
+                "score":      r["score"],
+                "date":       r["created_at"][:10],
+            }
+            for r in rows
+        ],
     }).encode()
 
     try:

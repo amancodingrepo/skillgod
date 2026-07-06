@@ -136,7 +136,19 @@ def get_relevant(task: str, project: str = "default",
     for m in all_mem:
         mem_words = set(re.findall(r'\b\w{4,}\b',
                                    f"{m['summary']} {m['detail']}".lower()))
-        overlap   = len(task_words & mem_words) / max(len(task_words), 1)
+        # BUG-040 FIX — require at least one shared word (prefix-tolerant, so
+        # "authentication" still matches a memory that says "auth"). Importance
+        # alone (0.9 * 0.4 = 0.36 > threshold) previously let completely
+        # unrelated memories ride along on every prompt.
+        hits = sum(
+            1 for tw in task_words
+            if tw in mem_words
+            or any(tw.startswith(mw) or mw.startswith(tw)
+                   for mw in mem_words)
+        )
+        if hits == 0:
+            continue
+        overlap   = hits / max(len(task_words), 1)
         score     = overlap * 0.6 + m["importance"] * 0.4
         scored.append((score, m))
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -240,6 +252,48 @@ def compress_observation(task: str, output: str) -> str:
     return output[:120]
 
 
+def derive_project_id(cwd: str = "") -> str:
+    """
+    BUG-016 FIX — a stable, collision-resistant project identifier.
+
+    Memory was keyed on `Path.cwd().name` (the bare folder name), so two
+    unrelated projects both called "backend" shared one memory bucket, and
+    renaming a folder orphaned its memory. This prefers the git remote URL
+    (normalised to host/owner/repo — identical across clones/renames, unique
+    across projects) and falls back to `<foldername>-<hash8(abspath)>` when
+    there's no remote, so local-only projects with the same folder name still
+    get distinct buckets. Returns a filesystem/DB-safe slug.
+    """
+    import hashlib as _hl
+    base = Path(cwd) if cwd else Path.cwd()
+    remote = ""
+    try:
+        remote = subprocess.check_output(
+            ["git", "-C", str(base), "config", "--get", "remote.origin.url"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        remote = ""
+
+    if remote:
+        # Normalise git@host:owner/repo.git and https://host/owner/repo.git
+        norm = remote.lower()
+        norm = re.sub(r"^\w+://", "", norm)
+        norm = re.sub(r"^git@", "", norm).replace(":", "/", 1)
+        norm = re.sub(r"\.git$", "", norm)
+        norm = re.sub(r"[^a-z0-9]+", "-", norm).strip("-")
+        return norm or base.name
+
+    # No remote — disambiguate same-named local folders by absolute path hash.
+    try:
+        abspath = str(base.resolve())
+    except Exception:
+        abspath = str(base)
+    digest = _hl.sha256(abspath.encode("utf-8")).hexdigest()[:8]
+    folder = re.sub(r"[^A-Za-z0-9]+", "-", base.name).strip("-") or "project"
+    return f"{folder}-{digest}"
+
+
 def get_git_context() -> dict:
     """
     Return git context for the current working directory.
@@ -291,17 +345,20 @@ def get_timeline(project: str = "default", limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_memory_index(project: str = "default") -> list[dict]:
+def get_memory_index(project: str = "default", limit: int = 1000) -> list[dict]:
     """
     Return a lightweight index of memories for the project.
     Each entry: { id, kind, summary, created_at }
     Used for progressive disclosure in Obsidian / CLI.
+
+    BUG-019 FIX — bounded by `limit` (newest first) so a long-lived project with
+    tens of thousands of rows doesn't return the entire table on every call.
     """
     conn = get_db()
     rows = conn.execute(
         "SELECT id, kind, summary, created_at FROM memory "
-        "WHERE project=? ORDER BY created_at DESC",
-        (project,)
+        "WHERE project=? ORDER BY created_at DESC LIMIT ?",
+        (project, limit)
     ).fetchall()
     conn.close()
     return [{"id": r["id"], "kind": r["kind"],

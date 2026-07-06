@@ -52,20 +52,25 @@ DEFAULT_TTL_DAYS = 30
 _MACHINE_ID_CACHE: str | None = None
 
 
-def get_machine_id() -> str:
+def get_canonical_machine_id() -> str:
     """
-    Returns a stable, hardware-based machine identifier.
+    Single source of truth for machine identity across the ENTIRE codebase.
+    Always returns sha256(raw_identity)[:32].
 
-    Windows : wmic csproduct get UUID
-    macOS   : ioreg -rd1 -c IOPlatformExpertDevice | grep UUID
-    Linux   : /etc/machine-id or /var/lib/dbus/machine-id
+    BUG-009 FIX — this replaces BOTH the old license.get_machine_id() and
+    encryption.get_machine_id() (which returned the RAW, unhashed id). Having two
+    schemes meant the same physical machine presented two different identities to
+    two different endpoints (license-validate got the hash, the vault endpoints
+    got the raw id), so binding enforcement and validation were split. Do NOT add
+    a third variant — import this one.
 
-    Falls back to a hostname+platform hash if the above fail.
+    Note: because canonical = sha256(raw)[:32], the server can transparently
+    migrate an OLD raw-id binding by checking sha256(stored_raw)[:32] == canonical
+    (see validate_pro_license_by_key), so no raw id ever needs to leave the machine.
 
-    Memoized per-process: this is called on every find_skills() invocation
-    (via _get_active_vault_dir() -> is_pro_active()), and _raw_machine_id()
-    shells out to wmic on Windows (~100ms+ uncached) — the machine's identity
-    can't change mid-process, so there's no correctness cost to caching it.
+    Memoized per-process: called on every find_skills() invocation via
+    _get_active_vault_dir() -> is_pro_active(); _raw_machine_id() shells out to
+    wmic on Windows (~100ms+), and machine identity can't change mid-process.
     """
     global _MACHINE_ID_CACHE
     if _MACHINE_ID_CACHE is None:
@@ -73,6 +78,13 @@ def get_machine_id() -> str:
         # Always return a 32-char hex digest — consistent, never exposes raw UUID
         _MACHINE_ID_CACHE = hashlib.sha256(raw.encode()).hexdigest()[:32]
     return _MACHINE_ID_CACHE
+
+
+def get_machine_id() -> str:
+    """Back-compat alias for the canonical machine id. Kept so existing callers
+    (`from license import get_machine_id`) keep working; delegates to the one
+    canonical implementation."""
+    return get_canonical_machine_id()
 
 
 def _raw_machine_id() -> str:
@@ -276,14 +288,19 @@ def validate_key(license_key: str, machine_id: str) -> dict:
     # 1. Try live API first
     try:
         result = _call_skillgod_api(license_key, machine_id)
-        # FIX 8 — recheck daily (ttl_days=1) instead of riding a 30-day cache,
-        # so an expired/cancelled subscription is caught within a day even if
-        # the user stays online. Offline grace still comes from the cache row.
+        # BUG-008 FIX — cache with the full 30-day offline grace, NOT ttl_days=1.
+        # Online users still get fresh status every run because this step (the
+        # live API call) always runs first and overwrites the cache; the TTL only
+        # governs the OFFLINE fallback window. ttl_days=1 collapsed the advertised
+        # 30-day grace to a single day, downgrading paying users who went offline
+        # for >24h. Cancellation is still enforced promptly online (the server now
+        # flips pro_licenses.active on cancel — BUG-001) and, offline, by the
+        # valid_until hard-expiry ceiling checked in _is_pro_active_impl.
         cache_validation(
             license_key,
             result["valid"],
             plan=result.get("plan", ""),
-            ttl_days=1,
+            ttl_days=DEFAULT_TTL_DAYS,
         )
         # Persist hard-expiry + tier + decryption-token state to the kv store.
         if result["valid"]:

@@ -83,7 +83,18 @@ def _track_cli_event(command: str):
 
 
 def track_cli(command: str):
-    """Public entry point — spawn a daemon thread so the CLI never waits."""
+    """Public entry point — spawn a daemon thread so the CLI never waits.
+
+    PRIVACY FIX (BUG-038) — CLI telemetry is now gated on the same opt-in as
+    quality signals. Previously it fired whenever SKILLGOD_API was set,
+    regardless of consent, contradicting the "nothing leaves your machine
+    unless you turn it on" promise."""
+    try:
+        from signals import is_enabled as _signals_enabled
+        if not _signals_enabled():
+            return
+    except Exception:
+        return  # can't verify consent — send nothing
     threading.Thread(target=_track_cli_event, args=(command,), daemon=True).start()
 
 
@@ -235,7 +246,11 @@ class SkillGodRuntime:
 
         # ── Layer 2: signal recording ──────────────────────────────────────
         if signals_enabled() and self.last_fired_skills:
-            rework = count_rework_signals(task + " " + output[:500])
+            # BUG-039 FIX — only scan the USER's text for rework intent. The
+            # AI's own output routinely contains words like "instead" or
+            # "actually", which counted as rework and unfairly dinged the
+            # active skills' quality scores.
+            rework = count_rework_signals(task)
             for sk in self.last_fired_skills:
                 sid  = sk.get("id") or sk.get("name", "unknown")
                 name = sk.get("name", sid)

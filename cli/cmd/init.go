@@ -108,6 +108,33 @@ func runInit(cmd *cobra.Command, args []string) error {
 			green("✓"), green(skillCount), secs)
 	}
 
+	// ── Pro restore ─────────────────────────────────────────────────────────
+	// A Pro user re-running init (or reinstalling) only has the free skills +
+	// instincts on disk until the encrypted vault is decrypted again. If this
+	// machine has a cached license key, re-run the sync path automatically so
+	// init never leaves a paying user on the free vault; otherwise, when the
+	// index looks free-tier-sized, tell them how to activate.
+	cachedKey, _ := runPython(sgRoot,
+		"from license import get_cached_key; print(get_cached_key())")
+	cachedKey = strings.TrimSpace(cachedKey)
+	if cachedKey != "" {
+		fmt.Printf("  %s Pro license detected — restoring full vault...\n", green("✓"))
+		licenseKey = cachedKey
+		if err := runSync(cmd, []string{}); err == nil {
+			if out, err := runPython(sgRoot,
+				"from skills import rebuild_index; print(rebuild_index())"); err == nil {
+				skillCount = strings.TrimSpace(out)
+			}
+		} else {
+			fmt.Printf("  %s Pro restore failed — run %s manually\n",
+				yellow("○"), bold("sg sync --key YOUR_KEY"))
+		}
+	} else {
+		fmt.Printf("  %s Have Pro? Activate the full vault: %s\n",
+			dim("○"), bold("sg sync --key YOUR_KEY"))
+		fmt.Printf("     %s\n", dim("(your key is at app.skillgod.dev/dashboard/billing)"))
+	}
+
 	// ── Live preview: show skills firing for a real task ───────────────────
 	demoTask := "build a React component"
 	demoCode := fmt.Sprintf(
