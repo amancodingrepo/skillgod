@@ -15,7 +15,8 @@ from datetime import datetime
 
 from memory  import (save, save_decision, save_pattern, save_error,
                      get_recent, get_relevant, format_for_injection,
-                     start_session, end_session, increment_task_count, stats)
+                     start_session, end_session, increment_task_count, stats,
+                     derive_project_id)
 from skills  import (find_skills, inject_skills, load_instincts,
                      build_augmented_prompt, learn_skill, stocktake,
                      rebuild_index)
@@ -98,6 +99,47 @@ def track_cli(command: str):
     threading.Thread(target=_track_cli_event, args=(command,), daemon=True).start()
 
 
+# ─────────────────────────────────────────────
+# Memory capture from an AI response — shared by SkillGodRuntime.on_post_tool
+# AND hooks/post_tool.py so both capture identically under the SAME project id.
+# (Previously on_post_tool held this logic but NO hook ever called it, so
+# decision→memory capture was dead in production; post_tool.py only recorded
+# signals.)
+# ─────────────────────────────────────────────
+
+_DECISION_SIGNALS = [
+    r"\bchose\b", r"\bdecided\b", r"\bwe will\b", r"\balways use\b",
+    r"\bnever use\b", r"\bstandard approach\b", r"\barchitecture\b",
+    r"\bconvention\b", r"\bpattern is\b", r"\bapproach is\b",
+]
+
+
+def capture_memory(task: str, output: str, project: str) -> dict:
+    """
+    Detect an architectural decision in `output` and persist it to memory,
+    keyed to `project`; then attempt to learn a reusable skill from the
+    task/output pair. Returns {"memory": id|None, "skill": path|None}.
+    Pure of any in-process runtime state so a fresh hook process can call it.
+    """
+    captured = {"memory": None, "skill": None}
+
+    hits = sum(1 for p in _DECISION_SIGNALS if re.search(p, output.lower()))
+    if hits >= 1:
+        sentences = re.split(r'[.!?]\s+', output)
+        summary   = next(
+            (s.strip() for s in sentences if len(s.strip()) > 20),
+            output[:120]
+        )
+        captured["memory"] = save_decision(
+            summary[:200], detail=output[:500], project=project)
+
+    learned = learn_skill(task, output, project=project)
+    if learned:
+        captured["skill"] = str(learned)
+
+    return captured
+
+
 class SkillGodRuntime:
     """
     The combined runtime.
@@ -120,8 +162,12 @@ class SkillGodRuntime:
 
     def __init__(self, project: str = None, session_id: str = None,
                  verbose: bool = False):
-        self.project    = project or os.environ.get("SKILLGOD_PROJECT",
-                                                     Path.cwd().name)
+        # BUG-B FIX — key the project the SAME way the hooks do: git-remote /
+        # abspath-hash via derive_project_id(). Previously this read
+        # SKILLGOD_PROJECT (baked into .mcp.json as the ENGINE INSTALL dir name),
+        # so the MCP path keyed every project on the machine to one shared
+        # bucket while hooks kept them isolated. One resolver now, in memory.py.
+        self.project    = project or derive_project_id()
         self.session_id = session_id or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.verbose    = verbose
         self.swarm      = SkillGodSwarm()
@@ -215,34 +261,13 @@ class SkillGodRuntime:
         2. Maybe learn new skill from output
         Returns dict with what was captured.
         """
-        captured = {"memory": None, "skill": None}
-
-        # Detect decision signals
-        DECISION_SIGNALS = [
-            r"\bchose\b", r"\bdecided\b", r"\bwe will\b", r"\balways use\b",
-            r"\bnever use\b", r"\bstandard approach\b", r"\barchitecture\b",
-            r"\bconvention\b", r"\bpattern is\b", r"\bapproach is\b",
-        ]
-        hits = sum(1 for p in DECISION_SIGNALS if re.search(p, output.lower()))
-
-        if hits >= 1:
-            sentences = re.split(r'[.!?]\s+', output)
-            summary   = next(
-                (s.strip() for s in sentences if len(s.strip()) > 20),
-                output[:120]
-            )
-            mem_id = save_decision(summary[:200], detail=output[:500],
-                                   project=self.project)
-            captured["memory"] = mem_id
-            if self.verbose:
-                print(f"[SkillGod] Decision saved to memory #{mem_id}")
-
-        # Maybe learn a skill
-        learned = learn_skill(task, output, project=self.project)
-        if learned:
-            captured["skill"] = str(learned)
-            if self.verbose:
-                print(f"[SkillGod] Learned skill → {Path(learned).name}")
+        # Decision→memory + skill learning (shared with hooks/post_tool.py).
+        captured = capture_memory(task, output, self.project)
+        if self.verbose:
+            if captured.get("memory"):
+                print(f"[SkillGod] Decision saved to memory #{captured['memory']}")
+            if captured.get("skill"):
+                print(f"[SkillGod] Learned skill → {Path(captured['skill']).name}")
 
         # ── Layer 2: signal recording ──────────────────────────────────────
         if signals_enabled() and self.last_fired_skills:

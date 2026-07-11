@@ -2,11 +2,11 @@
 """
 SkillGod Vault Split
 ====================
-Selects the 30 highest-confidence skills across categories and copies them
-to vault_free/ for the open-source free tier.
+Selects the highest-confidence scored skills across categories and copies them
+to vault_free/ for the open-source free tier. Instinct inclusion is controlled
+separately by FREE_TIER_INCLUDES_INSTINCTS (all-or-nothing) — see that constant.
 
-Distribution (30 total):
-  instincts  3    (all always-on rules — users need the basics)
+Non-instinct scored-skill distribution (27):
   coding     8    (biggest category, most useful)
   design     4
   writing    3
@@ -35,9 +35,29 @@ ROOT       = Path(__file__).parent.parent
 VAULT      = ROOT / "vault"
 VAULT_FREE = ROOT / "vault_free"
 
-# How many to pick per category (total = 30)
+# ─────────────────────────────────────────────────────────────────────────
+# REVERSIBLE DECISION POINT (instincts in the free tier)
+# ─────────────────────────────────────────────────────────────────────────
+# Instincts are always-on rules injected on every prompt. Whether the FREE tier
+# ships them (vs. gating them to Pro) is a business call, not an engineering one.
+# Flip this ONE constant and re-run `python engine/vault_split.py` to switch:
+#
+#   FREE_TIER_INCLUDES_INSTINCTS = True   → ALL instinct files ship in vault_free/
+#                                           (current default: instincts are a
+#                                           universal baseline every user gets)
+#   FREE_TIER_INCLUDES_INSTINCTS = False  → instincts are Pro-only; vault_free/
+#                                           ships ZERO instincts (they stay in
+#                                           vault/ for paid users)
+#
+# After flipping, run:  python engine/vault_split.py   (regenerates vault_free/)
+# then:                 python engine/skills.py index   (rebuilds the index)
+# No other code changes are needed either way.
+FREE_TIER_INCLUDES_INSTINCTS: bool = True
+
+# How many NON-INSTINCT scored skills to pick per category. Instinct inclusion
+# is governed entirely by FREE_TIER_INCLUDES_INSTINCTS above (all-or-nothing),
+# NOT by a quota, because instincts are unconditional rules, not scored picks.
 QUOTA: dict[str, int] = {
-    "instincts": 3,
     "coding":    8,
     "design":    4,
     "writing":   3,
@@ -92,6 +112,21 @@ def select_free_skills() -> list[dict]:
     Returns list of dicts with keys: category, path, name, confidence, description.
     """
     selected = []
+
+    # Instincts: all-or-nothing per FREE_TIER_INCLUDES_INSTINCTS (see the
+    # decision point at the top of this file). When included, EVERY instinct
+    # file ships free — they're a universal baseline, not a scored subset.
+    if FREE_TIER_INCLUDES_INSTINCTS:
+        inst_dir = VAULT / "instincts"
+        if inst_dir.exists():
+            for md in sorted(inst_dir.glob("*.md")):
+                selected.append({
+                    "category":    "instincts",
+                    "path":        md,
+                    "name":        _parse_name(md),
+                    "confidence":  _parse_confidence(md),
+                    "description": _parse_description(md),
+                })
 
     for cat, quota in QUOTA.items():
         cat_dir = VAULT / cat

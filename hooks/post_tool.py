@@ -38,6 +38,21 @@ def run(hook_input: dict) -> None:
     session_id  = hook_input.get("session_id", "unknown")
     active_skills = hook_input.get("active_skills", [])
 
+    # Capture decision→memory from the AI's output, keyed to THIS project's
+    # git-aware id (the SAME derive_project_id() the MCP server and other hooks
+    # use), so memory created here is visible to every tool in the same project.
+    # Previously nothing wired this: runtime.on_post_tool() held the logic but no
+    # hook ever called it, so output-driven memory capture was dead. Guarded so a
+    # capture hiccup never breaks the post-response hook.
+    try:
+        from memory import derive_project_id
+        from runtime import capture_memory
+        project = hook_input.get("project") or derive_project_id()
+        if task or output:
+            capture_memory(task, output, project)
+    except Exception as e:
+        sys.stderr.write(f"[skillgod/post_tool] memory capture warning: {e}\n")
+
     # Detect rework signals — BUG-039 FIX: scan only the USER's task text.
     # The AI's own output routinely says "instead"/"actually", which counted
     # as rework and unfairly dinged the active skills' quality scores.

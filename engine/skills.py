@@ -30,6 +30,15 @@ DB_PATH        = ROOT / "db" / "skillgod.db"
 SCORE_THRESHOLD = 0.18
 TOP_K_DEFAULT   = 3
 
+# REVERSIBLE DECISION POINT (how instincts are XML-fenced on injection).
+# False (default): instincts + scored skills share one <injected_expert_skills>
+#                  envelope (they are all always-on/expert reference material).
+# True:            instincts get a DEDICATED <injected_instincts> tag, separate
+#                  from <injected_expert_skills> (which then holds only scored
+#                  skills). Flip this ONE line — no other change needed; the very
+#                  next injected prompt uses the chosen shape.
+INSTINCTS_IN_SEPARATE_XML_TAG: bool = False
+
 
 def get_license_tier() -> str:
     """
@@ -221,24 +230,89 @@ def _phrase_match(needle: str, haystack: str, tokens: set) -> bool:
                      haystack) is not None
 
 
-def _word_overlap(desc: str, task: str) -> float:
+def _word_overlap(desc: str, t_words: set) -> float:
     d_words = set(re.findall(r'\b\w{4,}\b', desc.lower()))
-    t_words = set(re.findall(r'\b\w{4,}\b', task.lower()))
     if not d_words or not t_words:
         return 0.0
     overlap = len(d_words & t_words) / max(len(d_words), len(t_words))
     return min(overlap * 0.25, 0.25)
 
 
-def _score_skill(skill: dict, task: str) -> tuple[float, list[str]]:
+class _TaskIndex:
+    """PERF FIX (BUG-041) - find_skills() scores every vault skill (up to
+    ~1,900 on the Pro tier) against the SAME task string. The old code
+    re-derived task_lower/task_words/task_tokens from scratch via regex
+    INSIDE _score_skill, once per skill (1,900 redundant re.findall passes
+    per prompt), and the fuzzy-trigger fallback did an unbounded
+    triggers x task_words nested loop with no way to skip non-candidates
+    up front — 80k+ _fuzzy_fast calls on a full-vault prompt, ~330ms wall
+    time measured via cProfile (vs. the ~15ms the design intends).
+    This precomputes everything task-derived exactly ONCE per find_skills()
+    call and buckets task words by first-char+length so the fuzzy fallback
+    only ever looks at plausible candidates instead of the whole task."""
+
+    __slots__ = ("task_lower", "task_tokens", "words_len3", "words_len4",
+                 "by_first_char", "tokens_by_first_char",
+                 "_fuzzy_cache", "_tag_cache")
+
+    def __init__(self, task: str):
+        self.task_lower = task.lower()
+        self.task_tokens = set(re.findall(r'[a-z0-9]+', self.task_lower))
+        self.words_len3 = set(re.findall(r'\b\w{3,}\b', self.task_lower))
+        self.words_len4 = {w for w in self.words_len3 if len(w) >= 4}
+
+        by_char: dict[str, list[str]] = {}
+        for w in self.words_len3:
+            by_char.setdefault(w[0], []).append(w)
+        self.by_first_char = by_char
+
+        # Same bucketing for the tag near-match fallback below, which used to
+        # loop over ALL task_tokens (len > 3) for every non-exact tag.
+        tok_by_char: dict[str, list[str]] = {}
+        for w in self.task_tokens:
+            if len(w) > 3:
+                tok_by_char.setdefault(w[0], []).append(w)
+        self.tokens_by_first_char = tok_by_char
+
+        # Many skills in the vault share the same handful of triggers/tags
+        # (e.g. "python", "debug"); cache the candidate lookup per string so
+        # a 1,900-skill vault doesn't redo the same bucket lookup 1,900 times.
+        self._fuzzy_cache: dict[str, list[str]] = {}
+        self._tag_cache: dict[str, list[str]] = {}
+
+    def fuzzy_candidates(self, trigger: str) -> list[str]:
+        # Mirrors _fuzzy_fast's own gates (same first char, length delta <= 3)
+        # so we only ever call SequenceMatcher on words that could plausibly
+        # pass, instead of every word in the task.
+        cached = self._fuzzy_cache.get(trigger)
+        if cached is not None:
+            return cached
+        bucket = self.by_first_char.get(trigger[:1], ())
+        tl = len(trigger)
+        result = [w for w in bucket if abs(len(w) - tl) <= 3]
+        self._fuzzy_cache[trigger] = result
+        return result
+
+    def tag_candidates(self, tag: str) -> list[str]:
+        # Prefix match (either direction) requires the same first char, so
+        # bucketing by first char is a safe, lossless narrowing — same idea
+        # as fuzzy_candidates above, applied to the tag near-match fallback.
+        cached = self._tag_cache.get(tag)
+        if cached is not None:
+            return cached
+        result = self.tokens_by_first_char.get(tag[:1], ())
+        self._tag_cache[tag] = result
+        return result
+
+
+def _score_skill(skill: dict, tidx: "_TaskIndex") -> tuple[float, list[str]]:
     """
-    Score a skill against a task.
+    Score a skill against a task (via its precomputed _TaskIndex).
     Returns (score, matched_reasons) where matched_reasons explains why it fired.
     e.g. reasons = ['"debug"', '"traceback"', '#python', 'desc']
     """
-    task_lower = task.lower()
-    task_words = set(re.findall(r'\b\w{3,}\b', task_lower))
-    task_tokens = set(re.findall(r'[a-z0-9]+', task_lower))
+    task_lower  = tidx.task_lower
+    task_tokens = tidx.task_tokens
     score      = 0.0
     reasons: list[str] = []
 
@@ -247,7 +321,7 @@ def _score_skill(skill: dict, task: str) -> tuple[float, list[str]]:
         if _phrase_match(t, task_lower, task_tokens):
             score   += 0.35
             reasons.append(f'"{trigger}"')
-        elif " " not in t and any(_fuzzy_fast(t, w) for w in task_words):
+        elif " " not in t and any(_fuzzy_fast(t, w) for w in tidx.fuzzy_candidates(t)):
             score   += 0.15
             reasons.append(f'~"{trigger}"')
 
@@ -258,11 +332,11 @@ def _score_skill(skill: dict, task: str) -> tuple[float, list[str]]:
             reasons.append(f'#{tag}')
         elif " " not in t and len(t) > 3 and any(
                 (w.startswith(t) or t.startswith(w))
-                for w in task_tokens if len(w) > 3):
+                for w in tidx.tag_candidates(t)):
             score   += 0.08
             reasons.append(f'#{tag}')
 
-    overlap = _word_overlap(skill.get("description", ""), task)
+    overlap = _word_overlap(skill.get("description", ""), tidx.words_len4)
     score  += overlap
     if overlap > 0.05:
         reasons.append("desc")
@@ -292,22 +366,30 @@ def find_skills(task: str, top_k: int = TOP_K_DEFAULT) -> list[dict]:
     # prompt. The index is rebuilt at SessionStart and updated by learn_skill().
     # Tier boundary preserved (BUG-013): the DB only indexes vault/ (Pro), so
     # free users always load their own files directly (29 files, fast anyway).
-    if _get_active_vault_dir() == VAULT_DIR:
-        skills = _load_from_db()
+    from_db = _get_active_vault_dir() == VAULT_DIR
+    if from_db:
+        skills = _cached_light_rows()
         if not skills:
             skills = _load_all_skills(include_instincts=False)
+            from_db = False
     else:
         skills = _load_all_skills(include_instincts=False)
 
+    tidx = _TaskIndex(task)
     scored = []
     for sk in skills:
         if sk["skill_type"] == "instinct":
             continue
-        s, reasons = _score_skill(sk, task)
+        s, reasons = _score_skill(sk, tidx)
         if s >= SCORE_THRESHOLD:
-            sk["score"]   = s
-            sk["matched"] = reasons  # why this skill fired — shown in sg find
-            scored.append(sk)
+            # Copy — `skills` may be the cached light-rows list shared across
+            # calls in a long-lived process (MCP server); mutating the
+            # cached dicts in place would leak this call's score/matched
+            # into the next call's read of the same cached objects.
+            sk_out = dict(sk)
+            sk_out["score"]   = s
+            sk_out["matched"] = reasons  # why this skill fired — shown in sg find
+            scored.append(sk_out)
 
     # Dedup by skill name: ingestion produces many same-named files (some are
     # stale copies of each other), so a single logical skill can score multiple
@@ -325,7 +407,16 @@ def find_skills(task: str, top_k: int = TOP_K_DEFAULT) -> list[dict]:
     # resolved by rglob() filesystem order (OS-dependent), so identical prompts
     # could inject different skills on different machines. Break ties by name.
     deduped.sort(key=lambda x: (-x["score"], (x.get("name") or x.get("id") or x["path"]).lower()))
-    return deduped[:top_k]
+    winners = deduped[:top_k]
+
+    # Backfill body for the actual winners only — the DB-light path above
+    # loaded everything else without it.
+    if from_db and winners:
+        bodies = _fetch_bodies([w["path"] for w in winners])
+        for w in winners:
+            w["body"] = bodies.get(w["path"], w.get("body", ""))
+
+    return winners
 
 
 INSTINCT_MAX_WORDS = 120   # spec says 80; small buffer, hard cap here
@@ -377,20 +468,54 @@ def build_augmented_prompt(task: str, skills: list[dict] = None,
     """
     Build the full augmented prompt combining:
     task + instincts + matched skills + relevant memory.
+
+    RESEARCH ADOPTION 1.2 — the injected background context is wrapped in
+    explicit XML tags so instruction-tuned models can cleanly separate
+    authoritative injected material from the user's own prompt:
+      <injected_expert_skills> ... </injected_expert_skills>   (instincts + scored skills)
+      <project_historical_memory> ... </project_historical_memory>  (recalled memory)
+    This is PURELY a delivery-envelope change: what instincts load, which skills
+    score/inject, and which memories are selected are all unchanged — only how
+    the final payload is fenced differs. Instincts are grouped inside
+    <injected_expert_skills> because they are always-on expert-skill content;
+    this is a deliberate, flaggable choice (the two-tag model from the research
+    doc), not an accident.
     """
     parts = []
 
     instincts = load_instincts()
-    if instincts:
-        parts.append(instincts)
+    skill_block = inject_skills("", skills).strip() if skills else ""
 
-    if memory_context:
-        parts.append(memory_context)
-
-    if skills:
-        skill_block = inject_skills("", skills).strip()
+    if INSTINCTS_IN_SEPARATE_XML_TAG:
+        # ── Variant B: instincts get their OWN <injected_instincts> tag,
+        #    scored skills stay in <injected_expert_skills>. Flip the constant
+        #    INSTINCTS_IN_SEPARATE_XML_TAG (below the imports) to True for this.
+        if instincts:
+            parts.append("<injected_instincts>\n"
+                         + instincts
+                         + "\n</injected_instincts>")
         if skill_block:
-            parts.append(skill_block)
+            parts.append("<injected_expert_skills>\n"
+                         + skill_block
+                         + "\n</injected_expert_skills>")
+    else:
+        # ── Variant A (default): always-on instincts + scored skills share one
+        #    <injected_expert_skills> envelope.
+        expert_parts = []
+        if instincts:
+            expert_parts.append(instincts)
+        if skill_block:
+            expert_parts.append(skill_block)
+        if expert_parts:
+            parts.append("<injected_expert_skills>\n"
+                         + "\n\n".join(expert_parts)
+                         + "\n</injected_expert_skills>")
+
+    # Project memory envelope (unaffected by the instinct-tag choice).
+    if memory_context:
+        parts.append("<project_historical_memory>\n"
+                     + memory_context
+                     + "\n</project_historical_memory>")
 
     parts.append(f"**Task:**\n{task}")
     return "\n\n".join(parts)
@@ -476,6 +601,7 @@ def _index_skill_file(path: Path) -> None:
              datetime.now().isoformat(), sk["body"], sk["lib_id"]))
         conn.commit()
         conn.close()
+        _invalidate_light_cache()
     except Exception:
         pass  # SessionStart rebuild will catch up
 
@@ -543,27 +669,78 @@ def rebuild_index() -> int:
 
     conn.commit()
     conn.close()
+    _invalidate_light_cache()
     return count
 
 
-def _load_from_db() -> list[dict]:
-    """Load skills from SQLite if vault is empty."""
+_DB_LIGHT_COLS = "id, path, name, description, tags, triggers, skill_type, confidence, uses, lib_id"
+
+# PERF FIX (BUG-041) - the MCP server is a long-lived process for the
+# duration of a session (unlike the CLI, which is a fresh process per
+# invocation), so re-querying + re-json.loads-ing all ~1,900 rows on EVERY
+# prompt inside that one process is pure waste once the vault hasn't
+# changed. Cache the light rows in-process; invalidate on the only two
+# writers (rebuild_index, _index_skill_file). Findings from find_skills()
+# are always returned as copies (see find_skills), so callers mutating
+# their result never corrupt this cache.
+_light_rows_cache: list[dict] | None = None
+
+
+def _invalidate_light_cache() -> None:
+    global _light_rows_cache
+    _light_rows_cache = None
+
+
+def _cached_light_rows() -> list[dict]:
+    global _light_rows_cache
+    if _light_rows_cache is None:
+        _light_rows_cache = _load_from_db(include_body=False)
+    return _light_rows_cache
+
+
+def _load_from_db(include_body: bool = True) -> list[dict]:
+    """Load skills from SQLite if vault is empty.
+
+    PERF FIX (BUG-041) - scoring only ever needs the ~3 winning skills' full
+    body text (for injection); the other ~1,900 pay for a TEXT column they
+    never touch. include_body=False skips it — callers that need body for
+    specific skills should use _fetch_bodies() afterward."""
     if not DB_PATH.exists():
         return []
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM skills").fetchall()
+        cols = _DB_LIGHT_COLS if not include_body else "*"
+        rows = conn.execute(f"SELECT {cols} FROM skills").fetchall()
         conn.close()
         result = []
         for r in rows:
             sk = dict(r)
             sk["tags"]     = json.loads(sk.get("tags") or "[]")
             sk["triggers"] = json.loads(sk.get("triggers") or "[]")
+            if not include_body:
+                sk["body"] = ""
             result.append(sk)
         return result
     except Exception:
         return []
+
+
+def _fetch_bodies(paths: list[str]) -> dict[str, str]:
+    """Fetch body text for a specific set of skill paths (the final top_k
+    winners) — the one place find_skills() actually needs full skill content."""
+    if not paths or not DB_PATH.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        placeholders = ",".join("?" for _ in paths)
+        rows = conn.execute(
+            f"SELECT path, body FROM skills WHERE path IN ({placeholders})", paths
+        ).fetchall()
+        conn.close()
+        return {p: b for p, b in rows}
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------

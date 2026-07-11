@@ -108,6 +108,18 @@ def main() -> None:
     )
     session_id = data.get("session_id", "")
 
+    # Self-healing watcher startup — this is the PRIMARY self-heal trigger:
+    # PreToolUse fires more often than any other hook, so a watcher killed by
+    # a reboot gets repaired here first in practice. ~0.1ms when already
+    # running (measured) — fires unconditionally, even for a request the
+    # security gate below ends up blocking, since that's still real SkillGod
+    # usage. See engine/fs_watcher.py's ensure_watcher_running() docstring.
+    try:
+        from fs_watcher import ensure_watcher_running
+        ensure_watcher_running(str(Path.cwd()))
+    except Exception:
+        pass
+
     # --- Security gate: must fail CLOSED. Scan the ENTIRE payload (every string
     # field), not just the extracted task, and block on any exception. This is
     # the step the old code accidentally let fall through a catch-all

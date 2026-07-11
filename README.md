@@ -1,4 +1,4 @@
-# SkillGod ![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-v1.0.0-green) ![Skills](https://img.shields.io/badge/free_skills-30-orange) ![Pro Skills](https://img.shields.io/badge/pro_skills-1927-purple)
+# SkillGod
 
 **Claude knows how to code. SkillGod knows how *you* code.**
 
@@ -24,7 +24,7 @@ Every session starts cold. SkillGod fixes that.
 
 | | Without SkillGod | With SkillGod |
 |---|---|---|
-| Context per prompt | 0 | 3 scored skills + 31 instincts |
+| Context per prompt | 0 | 3 scored skills + 32 instincts |
 | Memory across sessions | Cold start every time | SQLite per project |
 | Agent routing | One model, one task | 10 specialist agents, each with own skills |
 | Vault | — | 1,927 skills |
@@ -47,7 +47,7 @@ Your prompt
 ┌──────────────────────────────────────────────┐
 │  Pillar 1 — Skills                           │
 │  Score 1,927 skills against your task        │
-│  Inject top 3 + all 31 instincts             │
+│  Inject top 3 + all 32 instincts             │
 │  (instincts fire every single prompt)        │
 └──────────────────────────────────────────────┘
     │
@@ -93,6 +93,7 @@ irm https://skillgod.dev/install.ps1 | iex
 git clone https://github.com/amancodingrepo/skillgod
 cd skillgod
 pip install -r requirements.txt
+python engine/ingest.py
 sg init
 ```
 
@@ -176,7 +177,7 @@ vault_stats()             → live vault counts
 |---------|------|---------------|-----|
 | **Price** | Free forever | **$7/mo locked forever** | $10/mo |
 | **Who** | Everyone | First 200 users only | User 201+ |
-| Skills | 30 starter skills | 1,927 (full vault) | 1,927 (full vault) |
+| Skills | 30 starter skills | 885+ (full vault) | 885+ (full vault) |
 | Instincts | All 32 | All 32 | All 32 |
 | Memory | Full SQLite layer | Full SQLite layer | Full SQLite layer |
 | Agent layer | Basic | Full multi-agent | Full multi-agent |

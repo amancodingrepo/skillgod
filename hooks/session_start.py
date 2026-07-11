@@ -125,6 +125,18 @@ def main() -> None:
         or _derive_project_id()
     )
 
+    # Self-healing watcher startup — cheap (~0.1ms when already running,
+    # measured), so it's safe on this hot path. Repairs a watcher killed by a
+    # reboot the next time a session actually starts, with no OS-level
+    # autostart entry needed. See ensure_watcher_running()'s docstring for
+    # the full rationale and the race-safety guarantee shared with
+    # hooks/pre_tool.py, engine/mcp_server.py, and cli/cmd/root.go.
+    try:
+        from fs_watcher import ensure_watcher_running
+        ensure_watcher_running(str(Path.cwd()))
+    except Exception:
+        pass
+
     # FIX 8 — license / expiry check at session start. Runs the (cached) online
     # check, downgrades to free the moment a license has expired, and warns the
     # user when they're inside the 7-day expiry window. Never blocks the

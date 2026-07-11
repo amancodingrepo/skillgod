@@ -1,0 +1,39 @@
+//go:build windows
+
+package cmd
+
+import (
+	"os/exec"
+	"syscall"
+
+	"golang.org/x/sys/windows"
+)
+
+// applyDetachAttrs detaches the child from this console so it survives both
+// this CLI process exiting AND the terminal window closing. Without
+// DETACHED_PROCESS, a console-attached child receives CTRL_CLOSE_EVENT when
+// the launching console closes and Windows terminates it — defeating the
+// entire point of a background watcher.
+func applyDetachAttrs(c *exec.Cmd) {
+	c.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
+}
+
+// isProcessAlive uses a real OpenProcess handle rather than os.FindProcess
+// (which on Windows always "succeeds" regardless of whether the PID exists —
+// it does no verification, so it can't be used as a liveness check here).
+func isProcessAlive(pid int) bool {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(h, &exitCode); err != nil {
+		return false
+	}
+	const stillActive = 259 // STILL_ACTIVE
+	return exitCode == stillActive
+}
