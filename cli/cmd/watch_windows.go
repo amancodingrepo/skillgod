@@ -14,9 +14,15 @@ import (
 // DETACHED_PROCESS, a console-attached child receives CTRL_CLOSE_EVENT when
 // the launching console closes and Windows terminates it — defeating the
 // entire point of a background watcher.
+//
+// CREATE_NO_WINDOW is also required — DETACHED_PROCESS alone does not
+// reliably suppress the console for a console-subsystem child (python.exe):
+// Windows can still briefly flash a conhost.exe window at spawn time.
+// Confirmed via live testing on this machine (visible conhost flashes in
+// Task Manager, one per self-heal spawn, until this flag was added).
 func applyDetachAttrs(c *exec.Cmd) {
 	c.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS | windows.CREATE_NO_WINDOW,
 	}
 }
 

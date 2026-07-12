@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 
 from memory  import (save, save_decision, save_pattern, save_error,
+                     save_with_git,
                      get_recent, get_relevant, format_for_injection,
                      start_session, end_session, increment_task_count, stats,
                      derive_project_id)
@@ -114,7 +115,8 @@ _DECISION_SIGNALS = [
 ]
 
 
-def capture_memory(task: str, output: str, project: str) -> dict:
+def capture_memory(task: str, output: str, project: str,
+                   session_id: str = "") -> dict:
     """
     Detect an architectural decision in `output` and persist it to memory,
     keyed to `project`; then attempt to learn a reusable skill from the
@@ -130,8 +132,14 @@ def capture_memory(task: str, output: str, project: str) -> dict:
             (s.strip() for s in sentences if len(s.strip()) > 20),
             output[:120]
         )
-        captured["memory"] = save_decision(
-            summary[:200], detail=output[:500], project=project)
+        # BUG FIX — was save_decision(), which never tags git branch/commit.
+        # save_with_git() already has exactly this logic (it just never got
+        # wired into the real, hook-driven capture path) — same kind and
+        # importance save_decision() used, so this is a drop-in swap, not a
+        # behavior change beyond adding the git tag to `detail`.
+        captured["memory"] = save_with_git(
+            summary[:200], detail=output[:500], kind="decision",
+            project=project, importance=0.9, session_id=session_id)
 
     learned = learn_skill(task, output, project=project)
     if learned:

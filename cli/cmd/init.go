@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -399,6 +401,28 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// ── Repair mode: audit memory for rows stranded under the old key ───────
 	if repairMode {
 		auditMemoryKeys(sgRoot, green, yellow, dim)
+	}
+
+	// ── Anonymous install ping + optional account link ─────────────────────
+	// The ping carries only the anonymous install_id (a random UUID minted
+	// locally, never derived from hardware), OS and detected IDE — no email,
+	// no login, no prompt. Linking an email is a separate, voluntary browser
+	// action via the printed URL; the CLI never asks for credentials.
+	installID, _ := runPython(sgRoot,
+		"from license import get_install_id; print(get_install_id())")
+	installID = strings.TrimSpace(installID)
+	if installID != "" {
+		ideName := ""
+		if len(detected) > 0 {
+			ideName = detected[0].name
+		}
+		sendInitPing(installID, ideName)
+		fmt.Println()
+		fmt.Printf("  %s\n", bold("SkillGod is ready."))
+		fmt.Printf("    To activate Pro, redeem a code:   %s\n", bold("sg redeem YOUR-CODE"))
+		fmt.Printf("    Or link your account %s for updates and\n", dim("(optional)"))
+		fmt.Printf("    license management:\n")
+		fmt.Printf("      %s\n", cyan(appBaseURL()+"/link?install="+installID))
 	}
 
 	fmt.Println()
@@ -979,6 +1003,49 @@ func hookAlreadyRegistered(arr []interface{}, scriptBase string) bool {
 		}
 	}
 	return false
+}
+
+// appBaseURL is the dashboard origin for the optional account-link URL.
+// Overridable for local/test backends the same way SKILLGOD_API is.
+func appBaseURL() string {
+	if v := os.Getenv("SKILLGOD_APP"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "https://app.skillgod.dev"
+}
+
+// sendInitPing fires the anonymous install/init telemetry event: install_id
+// (random local UUID), OS, and the detected IDE. No email, no hostname, no
+// hardware identifiers. Fire-and-forget: short timeout, silent on any
+// failure, and skipped entirely when SKILLGOD_NO_TELEMETRY is set.
+func sendInitPing(installID, ide string) {
+	if os.Getenv("SKILLGOD_NO_TELEMETRY") != "" {
+		return
+	}
+	apiURL := os.Getenv("SKILLGOD_API")
+	if apiURL == "" {
+		apiURL = "https://api.skillgod.dev"
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"event":      "init",
+		"machine_id": installID, // anonymous install id, not a hardware id
+		"plan":       "free",
+		"metadata": map[string]string{
+			"os":         runtime.GOOS,
+			"ide":        ide,
+			"install_id": installID,
+		},
+	})
+	if err != nil {
+		return
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Post(
+		strings.TrimRight(apiURL, "/")+"/v1/track",
+		"application/json", bytes.NewReader(payload))
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 func pythonCmd() string {

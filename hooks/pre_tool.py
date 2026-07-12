@@ -30,6 +30,15 @@ from pathlib import Path
 ENGINE = Path(__file__).parent.parent / "engine"
 sys.path.insert(0, str(ENGINE))
 
+# Windows: hook stdout/stderr are pipes, so Python encodes with the legacy
+# ANSI codepage (cp1252) and printing a skill payload containing ✓/→/… dies
+# with UnicodeEncodeError — injection silently delivers nothing. The host
+# reads hook output as UTF-8, so emit UTF-8 explicitly.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Module-level imports — fail hard. If the engine package itself is broken
 # or missing, we do NOT want to silently fall through to exit(0) and let
 # every tool call through unscanned. A broken install should be loud, not
@@ -37,6 +46,18 @@ sys.path.insert(0, str(ENGINE))
 # the hook with a non-zero exit / traceback instead of being swallowed.
 from runtime import get_runtime          # noqa: E402
 from security import security_scan       # noqa: E402
+
+
+# Strict mode: hard-block the tool call on a detected injection pattern.
+# Default (unset / "0"): warn-and-allow. Mirrors hooks/user_prompt_submit.py so
+# the two security hooks behave identically. The detector matches patterns that
+# also occur in legitimate developer work (discussing / testing / reviewing /
+# editing security code), so a hard block by default interrupts real work more
+# often than it stops a real attack. Genuine ENGINE failures (broken import,
+# scan crash, unparseable input) still fail CLOSED regardless of mode.
+STRICT = os.environ.get("SKILLGOD_STRICT_SECURITY", "0").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 
 def _derive_project_id() -> str:
@@ -132,8 +153,16 @@ def main() -> None:
         sys.exit(2)
 
     if threats:
-        sys.stderr.write("[skillgod] BLOCKED: injection attempt detected\n")
-        sys.exit(2)
+        names = ", ".join(t["pattern"] for t in threats[:3])
+        if STRICT:
+            sys.stderr.write(
+                f"[skillgod] BLOCKED: injection attempt detected ({names})\n")
+            sys.exit(2)
+        # Default: warn, but let the tool call through. The user stays in
+        # control; a false positive on legitimate work no longer halts it.
+        sys.stderr.write(
+            f"[skillgod] warning: possible injection pattern ({names}) — "
+            f"allowing (set SKILLGOD_STRICT_SECURITY=1 to block)\n")
 
     # Nothing to score/inject if there's no task text — but only AFTER the
     # security gate above has run on the full payload.

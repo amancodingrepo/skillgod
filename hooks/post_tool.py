@@ -21,6 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "engine"))
 
+# Windows: hook stdout/stderr are pipes (legacy cp1252 default) — emit UTF-8
+# so captured output containing non-ANSI characters can't crash the hook.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from signals  import record_no_rework, record_rework, count_rework_signals
 from variants import scan_meta_for_variants, add_to_promotion_queue, auto_enqueue_candidates
 
@@ -49,7 +56,9 @@ def run(hook_input: dict) -> None:
         from runtime import capture_memory
         project = hook_input.get("project") or derive_project_id()
         if task or output:
-            capture_memory(task, output, project)
+            # session_id threads through to the memory row so session_end.py
+            # can summarize THIS session's rows only.
+            capture_memory(task, output, project, session_id=session_id)
     except Exception as e:
         sys.stderr.write(f"[skillgod/post_tool] memory capture warning: {e}\n")
 

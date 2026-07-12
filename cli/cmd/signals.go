@@ -86,7 +86,15 @@ print(json.dumps({
     "enabled": is_enabled(),
 }))
 `
-	out, err := runPython(sgRoot, strings.ReplaceAll(statsCode, "\n", " "))
+	// BUG FIX — this used to flatten newlines to spaces before handing the
+	// code to `python -c`. Spaces are not Python statement separators, so
+	// the 3 top-level statements here (2 imports + print) collapsed into one
+	// syntactically invalid line ("import json print(...)" with no
+	// separator) — a real SyntaxError on every single run, always exit 1.
+	// runPython's underlying exec.Command passes this as one argv string
+	// directly (no shell involved), so the embedded real newlines below are
+	// passed through to Python intact and parse correctly as-is.
+	out, err := runPython(sgRoot, statsCode)
 	if err != nil {
 		return fmt.Errorf("signals engine error: %w", err)
 	}
@@ -142,11 +150,18 @@ print(json.dumps({
 			if i >= 10 {
 				break
 			}
-			nameEnd := strings.Index(chunk, `"`)
-			if nameEnd < 2 {
+			// BUG FIX — chunk starts with `: "<name>", ...` right after the
+			// split on `"skill_name"`. strings.Index(chunk, `"`) found the
+			// FIRST quote — the value's own OPENING quote at index 2, not
+			// its closing one — so chunk[:nameEnd] was just `: ` and Trim
+			// reduced that to "", printing every skill name as blank. Skip
+			// the known `: "` prefix first, then find the closing quote.
+			rest := strings.TrimPrefix(chunk, `: "`)
+			nameEnd := strings.Index(rest, `"`)
+			if nameEnd < 0 {
 				continue
 			}
-			name := strings.Trim(chunk[:nameEnd], `: "`)
+			name := rest[:nameEnd]
 			fires := getVal("fires", chunk)
 			avg   := getVal("avg_score", chunk)
 			arate := getVal("accept_rate", chunk)

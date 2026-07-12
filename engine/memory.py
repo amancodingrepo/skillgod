@@ -114,15 +114,28 @@ def save_error(summary: str, detail: str = "",
 # READ
 # ─────────────────────────────────────────────
 
-def get_recent(project: str = "default", limit: int = 10) -> list[dict]:
-    """Get most recent memories for a project."""
+def get_recent(project: str = "default", limit: int = 10,
+               session_id: str | None = None) -> list[dict]:
+    """Get most recent memories for a project. When session_id is given,
+    return only rows captured under that session — session_end.py uses this so
+    a session summary reflects THIS session's work, not the whole project's
+    history (which made every empty session in an old project re-summarize
+    stale decisions into a fresh noise row)."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT kind, summary, detail, created_at, importance "
-        "FROM memory WHERE project=? "
-        "ORDER BY created_at DESC LIMIT ?",
-        (project, limit)
-    ).fetchall()
+    if session_id:
+        rows = conn.execute(
+            "SELECT kind, summary, detail, created_at, importance "
+            "FROM memory WHERE project=? AND session_id=? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (project, session_id, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT kind, summary, detail, created_at, importance "
+            "FROM memory WHERE project=? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (project, limit)
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -321,23 +334,31 @@ def get_git_context() -> dict:
 
 
 def save_with_git(summary: str, detail: str = "", kind: str = "context",
-                  project: str = "default", importance: float = 0.5) -> int:
+                  project: str = "default", importance: float = 0.5,
+                  session_id: str = "") -> int:
     """Save a memory item with git context appended to detail."""
     git = get_git_context()
     if git:
         git_tag = f"[branch:{git['branch']} commit:{git['commit']}]"
         detail  = f"{detail} {git_tag}".strip()
-    return save(summary, detail, kind=kind, project=project, importance=importance)
+    return save(summary, detail, kind=kind, project=project,
+                session_id=session_id, importance=importance)
 
 
 def get_timeline(project: str = "default", limit: int = 30) -> list[dict]:
     """
     Chronological memory timeline, newest first.
-    Each entry: { kind, summary, created_at }. Powers `sg timeline`.
+    Each entry: { kind, summary, detail, created_at }. Powers `sg timeline`.
+
+    BUG FIX — used to select only (kind, summary, created_at). The git
+    branch/commit tag save_with_git() writes lives in `detail` (there is no
+    separate branch/commit column — see capture_memory()), so without
+    `detail` here `sg timeline` had no way to show it even after the
+    capture-side fix.
     """
     conn = get_db()
     rows = conn.execute(
-        "SELECT kind, summary, created_at FROM memory WHERE project=? "
+        "SELECT kind, summary, detail, created_at FROM memory WHERE project=? "
         "ORDER BY created_at DESC LIMIT ?",
         (project, limit)
     ).fetchall()

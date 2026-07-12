@@ -10,6 +10,14 @@ and unpacks it to ~/.skillgod/ so that `sg init` can find
 
 What goes in (free tier only):
   engine/*.py        — the runtime (scoring, memory, security, agents, MCP server)
+  hooks/*.py         — the 5 Claude Code lifecycle hooks (session_start,
+                       user_prompt_submit, pre_tool, post_tool, session_end).
+                       CRITICAL: `sg init` registers these into
+                       ~/.claude/settings.json as absolute paths under
+                       sgRoot/hooks/ (== ~/.skillgod/hooks/ on a real install).
+                       Without them here, a fresh install registers hooks that
+                       point at files that do not exist — every hook silently
+                       non-functional, including SessionEnd.
   vault/instincts/   — all always-on instincts (always free)
   vault/<free>/      — FREE_SKILL_COUNT highest-confidence starter skills
   requirements.txt   — engine deps (only needed for the MCP server)
@@ -43,6 +51,7 @@ ENGINE_REQUIREMENTS = "mcp>=1.2.0\n"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENGINE_DIR = REPO_ROOT / "engine"
+HOOKS_DIR = REPO_ROOT / "hooks"
 VAULT_DIR = REPO_ROOT / "vault"
 
 
@@ -93,12 +102,18 @@ def main() -> int:
     engine_files = [
         p for p in ENGINE_DIR.glob("*.py") if p.name not in ENGINE_EXCLUDE
     ]
+    # The 5 Claude Code lifecycle hooks. init.go registers them at
+    # sgRoot/hooks/<name>, and the installer extracts engine.zip flat into
+    # ~/.skillgod, so they MUST ship here at hooks/<name>.
+    hook_files = sorted(HOOKS_DIR.glob("*.py"))
     instincts = sorted(VAULT_DIR.glob("instincts/*.md"))
     free_skills = pick_free_skills()
 
     with zipfile.ZipFile(str(out), "w", zipfile.ZIP_DEFLATED) as zf:
         for p in engine_files:
             zf.write(p, f"engine/{p.name}")
+        for p in hook_files:
+            zf.write(p, f"hooks/{p.name}")
         for p in instincts:
             zf.write(p, f"vault/instincts/{p.name}")
         for p in free_skills:
@@ -107,10 +122,21 @@ def main() -> int:
         zf.writestr("db/.gitkeep", "")
         zf.writestr("VERSION", version + "\n")
 
+    # Guardrail: a bundle missing hooks is the exact bug this fixes — fail loud.
+    EXPECTED_HOOKS = {"session_start.py", "user_prompt_submit.py",
+                      "pre_tool.py", "post_tool.py", "session_end.py"}
+    shipped = {p.name for p in hook_files}
+    missing = EXPECTED_HOOKS - shipped
+    if missing:
+        print(f"ERROR: engine bundle is missing required hooks: {sorted(missing)}",
+              file=sys.stderr)
+        return 1
+
     size_mb = out.stat().st_size / (1024 * 1024)
     print(f"engine bundle built: {out}")
     print(f"  version:    {version}")
     print(f"  engine:     {len(engine_files)} python files")
+    print(f"  hooks:      {len(hook_files)} lifecycle hooks")
     print(f"  instincts:  {len(instincts)}")
     print(f"  skills:     {len(free_skills)} (free starter set)")
     print(f"  size:       {size_mb:.2f} MB")

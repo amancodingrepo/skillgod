@@ -66,7 +66,14 @@ q = get_promotion_queue('pending')
 s = queue_stats()
 print(json.dumps({"queue": q, "stats": s}))
 `
-	out, err := runPython(sgRoot, strings.ReplaceAll(queueCode, "\n", "; "))
+	// BUG FIX — same class of bug as sg signals: queueCode starts with a
+	// literal leading newline (the raw string opens right after the
+	// backtick), which ReplaceAll turned into a leading "; ". Combined with
+	// runPython's own "...; %s" prefix, that produced a double-semicolon
+	// ("...engine'); ; from variants...") — a real SyntaxError on every
+	// run, always exit 1. Real newlines pass through python -c intact and
+	// parse correctly, so no flattening is needed at all.
+	out, err := runPython(sgRoot, queueCode)
 	if err != nil {
 		return fmt.Errorf("queue error: %w", err)
 	}

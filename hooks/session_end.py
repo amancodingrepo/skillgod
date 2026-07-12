@@ -46,6 +46,13 @@ from pathlib import Path
 ENGINE = Path(__file__).parent.parent / "engine"
 sys.path.insert(0, str(ENGINE))
 
+# Windows: hook stdout/stderr are pipes (legacy cp1252 default) — emit UTF-8
+# so summary text containing non-ANSI characters can't crash session teardown.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _derive_project_id() -> str:
     """Collision-resistant project id (BUG-016), matching every other hook.
@@ -103,7 +110,13 @@ def main() -> None:
         #    (limit is raised to 12 pre-filter so we still surface up to a few real
         #    rows even when context rows are interleaved.)
         SUMMARY_KINDS = ("decision", "pattern", "error")
-        mems = [m for m in get_recent(project, limit=12)
+        # Scope to THIS session's rows when we have a session_id (post_tool now
+        # stamps session_id on captured rows). Without the scope, an empty
+        # session in a project with history re-summarized OLD decisions into a
+        # fresh noise row on every IDE close. No session_id → fall back to
+        # project-recent (pre-session_id rows / direct invocation).
+        mems = [m for m in get_recent(project, limit=12,
+                                      session_id=session_id or None)
                 if m.get("kind") in SUMMARY_KINDS][:6]
         summary = _build_summary(mems)
 

@@ -26,6 +26,14 @@ from pathlib import Path
 ENGINE = Path(__file__).parent.parent / "engine"
 sys.path.insert(0, str(ENGINE))
 
+# Windows: hook stdout/stderr are pipes, so Python encodes with the legacy
+# ANSI codepage (cp1252) and printing instincts/memory containing ✓/→/… dies
+# with UnicodeEncodeError. The host reads hook output as UTF-8 — emit UTF-8.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _check_db_integrity() -> None:
     """

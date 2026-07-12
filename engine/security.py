@@ -61,11 +61,28 @@ _COMPACT_SIGNATURES = [
     ("forgetyourinstruct",   "forget-instructions"),
     ("forgetinstruct",       "forget-instructions"),
     ("forgetyourrules",      "forget-instructions"),
-    ("jailbreak",            "jailbreak"),
+    # Jailbreak family — INTENT-bearing compact forms only. Bare "jailbreak"
+    # was removed: it matched "jailbreak detector" / "jailbreak attempt" in
+    # ordinary security-dev prompts. These require an activation verb or an
+    # AI-directed "jailbroken <ai|assistant|model>" (defeats letter-spacing
+    # while still requiring the same intent as the spaced regexes above).
+    ("enablejailbreak",      "jailbreak-activate"),
+    ("enterjailbreak",       "jailbreak-activate"),
+    ("activatejailbreak",    "jailbreak-activate"),
+    ("turnonjailbreak",      "jailbreak-activate"),
+    ("intojailbreak",        "jailbreak-activate"),
+    ("jailbrokenai",         "jailbroken-ai"),
+    ("jailbrokenassistant",  "jailbroken-ai"),
+    ("jailbrokenmodel",      "jailbroken-ai"),
+    ("jailbrokenchatbot",    "jailbroken-ai"),
     ("dan mode".replace(" ", ""), "dan-mode"),
-    ("developermode",        "privileged-mode-jailbreak"),
-    ("sudomode",             "privileged-mode-jailbreak"),
-    ("godmode",              "privileged-mode-jailbreak"),
+    # Privileged-mode jailbreaks require the activation verb (bare
+    # "developermode" / "sudomode" / "godmode" were ordinary-feature false
+    # positives — e.g. "developer mode", a game "god mode", "sudo mode").
+    ("enabledevelopermode",  "privileged-mode-jailbreak"),
+    ("enablegodmode",        "privileged-mode-jailbreak"),
+    ("enablesudomode",       "privileged-mode-jailbreak"),
+    ("activategodmode",      "privileged-mode-jailbreak"),
     # BUG-037 FIX — bare "systemprompt" blocked every legitimate mention of
     # "system prompt" (e.g. "design a system prompt template for my chatbot").
     # Only flag when a leak verb or possessive is attached, mirroring the
@@ -78,7 +95,9 @@ _COMPACT_SIGNATURES = [
     ("repeatsystemprompt",   "prompt-leak"),
     ("dumpsystemprompt",     "prompt-leak"),
     ("leaksystemprompt",     "prompt-leak"),
-    ("newpersona",           "new-persona"),
+    # bare "newpersona" removed — it flagged "add a new persona field to the
+    # user model". The spaced regex still catches "new persona:" / "adopt a
+    # new persona" (assignment/command intent).
     ("actasunrestricted",    "act-as-jailbreak"),
     ("actasjailbroken",      "act-as-jailbreak"),
     ("bypasssafety",         "safety-bypass"),
@@ -101,17 +120,42 @@ INJECTION_PATTERNS = [
     (r"forget\s+(your\s+)?(instructions?|rules?|training|guidelines?|constraints?)",
      "forget-instructions"),
 
-    # Role / persona hijacking
-    (r"you\s+are\s+now\s+(?!a\s+(?:developer|assistant|coder|engineer))\S+",
+    # Role / persona hijacking.
+    # These require INJECTION INTENT — an imperative directed at the assistant
+    # to adopt a new identity or escape its instructions — not the mere mention
+    # of a concept word. "discuss the jailbreak detector", "test a jailbreak
+    # attempt", "detect jailbroken devices", "add a new persona field",
+    # "enable debug mode" are all legitimate developer prompts and must NOT trip.
+    # "you are now <identity>" — a persona reassignment. Exclude benign
+    # capability continuations ("you are now able/ready/logged in/on the …")
+    # so ordinary status sentences don't trip it; identity words still match.
+    (r"you\s+are\s+now\s+"
+     r"(?!(?:a\s+(?:developer|assistant|coder|engineer)|able|allowed|ready|free|"
+     r"logged|signed|connected|online|offline|in\b|on\b|off\b|viewing|seeing|"
+     r"looking|running|using|able\s+to)\b)\S+",
      "persona-hijack"),
     (r"act\s+as\s+(?:an?\s+)?(unrestricted|jailbroken|dan|unc[e]nsored|evil|harmful)",
      "act-as-jailbreak"),
-    (r"new\s+persona",                                "new-persona"),
+    # "new persona" only as an assignment/command, not "a new persona field".
+    (r"(?:(?:adopt|assume|become|take\s+on|switch\s+to)\s+(?:a\s+)?new\s+persona"
+     r"|new\s+persona\s*[:=])",
+     "new-persona"),
     (r"\bdan\s+mode\b",                               "dan-mode"),
-    (r"(?:enable|enter|activate|turn\s+on)?\s*\b(developer|god|sudo|admin|root|debug)\s+mode\b",
+    # Privileged-mode jailbreaks require the ACTIVATION verb — bare "debug mode"
+    # / "developer mode" / "admin mode" are ordinary app features.
+    (r"(?:enable|enter|activate|turn\s+on|switch\s+to)\s+(?:the\s+)?(developer|god|sudo|kernel)\s+mode\b",
      "privileged-mode-jailbreak"),
-    (r"jailbreak",                                    "jailbreak"),
-    (r"(unrestricted|uncensored)\s+(ai|mode|version)", "unrestricted-ai"),
+    # "jailbreak" only when it's an imperative to jailbreak (activation verb) or
+    # a claim that the ASSISTANT is jailbroken — never a bare noun mention.
+    (r"(?:enable|enter|activate|turn\s+on|initiate|switch\s+to|into)\s+(?:the\s+)?jailbreak(?:\s+mode)?\b",
+     "jailbreak-activate"),
+    (r"you(?:'?re|\s+are)\s+(?:now\s+)?jailbroken\b",
+     "jailbroken-you"),
+    (r"\bjailbroken\s+(?:ai|assistant|model|chatbot|llm|bot)\b",
+     "jailbroken-ai"),
+    # AI-directed "unrestricted/uncensored AI", not "unrestricted version/mode".
+    (r"(unrestricted|uncensored|unfiltered)\s+(ai|assistant|model|chatbot|llm|bot)",
+     "unrestricted-ai"),
 
     # Token injection (LLM-level attacks)
     (r"<\|im_start\|>",   "token-injection-start"),

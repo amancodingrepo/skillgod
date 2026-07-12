@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,28 +38,58 @@ func runTimeline(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Project = current directory name (matches how sg init / runtime tag memory)
-	project := "default"
-	if cwd, err := os.Getwd(); err == nil {
-		project = filepath.Base(cwd)
+	// BUG FIX — this used to key on filepath.Base(cwd) (just the folder
+	// name), while hooks and the MCP server both key memory on
+	// derive_project_id() (git-remote-normalized, or folder+abspath-hash).
+	// For any project with a git remote, those two never matched, so
+	// `sg timeline` was querying under a project key nothing was ever
+	// written to — it would show "No memory captured yet" even with real
+	// captured rows sitting in the DB under the correct id. Same bug class
+	// as the original hooks/MCP project-id mismatch, just found in a third
+	// place. Resolve the same way everywhere else does — one Python call
+	// returning both the resolved project id and the timeline, rather than
+	// two separate subprocess round-trips for one derived value.
+	//
+	// SECOND BUG FOUND WHILE FIXING THE FIRST — runPython() always sets
+	// c.Dir = sgRoot for the child process (needed so its own relative
+	// imports work), which means derive_project_id() called with NO
+	// argument inside that subprocess resolves against sgRoot, not the
+	// directory `sg timeline` was actually run from. Must capture the real
+	// caller's cwd here in Go, before runPython changes it, and pass it in
+	// explicitly — derive_project_id(cwd) accepts exactly this for exactly
+	// this reason.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot resolve current directory: %w", err)
 	}
-
 	code := fmt.Sprintf(
-		`import json;from memory import get_timeline;`+
-			`print(json.dumps(get_timeline('%s', %d)))`,
-		strings.ReplaceAll(project, "'", `\'`), timelineLimit,
+		`import json;from memory import get_timeline, derive_project_id;`+
+			`p=derive_project_id(%q);`+
+			`print(json.dumps({"project": p, "entries": get_timeline(p, %d)}))`,
+		cwd, timelineLimit,
 	)
 	out, err := runPython(sgRoot, code)
 	if err != nil {
 		return fmt.Errorf("memory engine error: %w", err)
 	}
 
-	var entries []struct {
-		Kind      string `json:"kind"`
-		Summary   string `json:"summary"`
-		CreatedAt string `json:"created_at"`
+	var result struct {
+		Project string `json:"project"`
+		Entries []struct {
+			Kind      string `json:"kind"`
+			Summary   string `json:"summary"`
+			Detail    string `json:"detail"`
+			CreatedAt string `json:"created_at"`
+		} `json:"entries"`
 	}
-	if json.Unmarshal([]byte(strings.TrimSpace(out)), &entries) != nil || len(entries) == 0 {
+	if json.Unmarshal([]byte(strings.TrimSpace(out)), &result) != nil {
+		return fmt.Errorf("memory engine error: could not parse timeline output")
+	}
+	project := result.Project
+	if project == "" {
+		project = "default"
+	}
+	if len(result.Entries) == 0 {
 		fmt.Printf("\n%s\n", bold("SkillGod timeline — "+project))
 		fmt.Println(dim("  No memory captured yet. It builds automatically as you code."))
 		fmt.Println()
@@ -81,14 +110,40 @@ func runTimeline(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// gitTag extracts a "[branch:X commit:Y]" tag save_with_git() appends to
+	// `detail`, if present — this is the git-branch attribution sg timeline
+	// is supposed to surface (see engine/memory.py's get_git_context()).
+	gitTag := func(detail string) string {
+		start := strings.Index(detail, "[branch:")
+		if start == -1 {
+			return ""
+		}
+		end := strings.Index(detail[start:], "]")
+		if end == -1 {
+			return ""
+		}
+		return detail[start : start+end+1]
+	}
+
 	fmt.Printf("\n%s\n\n", bold("SkillGod timeline — "+project))
-	for _, e := range entries {
-		fmt.Printf("  %s %s %s %s\n",
-			kindColor(e.Kind),
-			e.Summary,
-			dim("·"),
-			dim(fmtTimelineDate(e.CreatedAt)),
-		)
+	for _, e := range result.Entries {
+		tag := gitTag(e.Detail)
+		if tag != "" {
+			fmt.Printf("  %s %s %s %s %s\n",
+				kindColor(e.Kind),
+				e.Summary,
+				dim(tag),
+				dim("·"),
+				dim(fmtTimelineDate(e.CreatedAt)),
+			)
+		} else {
+			fmt.Printf("  %s %s %s %s\n",
+				kindColor(e.Kind),
+				e.Summary,
+				dim("·"),
+				dim(fmtTimelineDate(e.CreatedAt)),
+			)
+		}
 	}
 	fmt.Println()
 	return nil
