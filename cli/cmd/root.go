@@ -10,7 +10,7 @@ import (
 // Version is the SkillGod CLI version. Setting Version makes Cobra register a
 // `--version` flag automatically, so `sg --version` works. Override at build
 // time with: go build -ldflags "-X skillgod/cmd.Version=<v>"
-var Version = "1.0.0"
+var Version = "1.0.1"
 
 var rootCmd = &cobra.Command{
 	Use:     "sg",
