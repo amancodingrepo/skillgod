@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -43,6 +44,25 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	c.Stdin = os.Stdin
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("update failed: %w", err)
+	}
+
+	// Auto-restore Pro. The reinstall above lays down only the free engine, so a
+	// paying user would drop to free. If this machine has a saved license
+	// (persisted by a prior `sg sync --key`, and NOT wiped by the engine
+	// overwrite), re-sync the encrypted Pro vault automatically — no key
+	// re-entry. runSync with no --key picks up the saved key.
+	if sgRoot, rerr := findSkillGodRoot(); rerr == nil {
+		cached, _ := runPython(sgRoot,
+			"from license import get_cached_key; print(get_cached_key())")
+		if strings.TrimSpace(cached) != "" {
+			fmt.Println()
+			fmt.Println(bold("Restoring your Pro vault..."))
+			licenseKey = "" // ensure runSync uses the saved key
+			if serr := runSync(cmd, args); serr != nil {
+				fmt.Printf("  %s couldn't auto-restore Pro — run: sg sync\n",
+					color.New(color.FgYellow).SprintFunc()("[warn]"))
+			}
+		}
 	}
 
 	fmt.Println()

@@ -45,6 +45,20 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// No --key given? Fall back to a license saved by a previous activation.
+	// It lives in the local kv store inside db/skillgod.db, which `sg update`
+	// / reinstall does NOT overwrite (engine.zip ships only db/.gitkeep). This
+	// is what keeps a paying user on Pro across an update instead of silently
+	// dropping to free — previously the key was never persisted at all.
+	if licenseKey == "" {
+		cached, _ := runPython(sgRoot,
+			"from license import get_cached_key; print(get_cached_key())")
+		if cached = strings.TrimSpace(cached); cached != "" {
+			licenseKey = cached
+			fmt.Println(bold("Restoring Pro from your saved license..."))
+		}
+	}
+
 	if licenseKey == "" {
 		// Free tier — index local vault
 		fmt.Println(bold("Syncing free tier (30 starter skills)..."))
@@ -151,6 +165,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Files written: %s\n", green(written))
 		fmt.Println()
 		fmt.Printf("%s Full vault active. Skills injecting at every prompt.\n", green("[OK]"))
+		// Persist the key that just worked so `sg update` / reinstall can
+		// auto-restore Pro without the user re-entering it. Best-effort.
+		runPython(sgRoot,
+			fmt.Sprintf("from license import save_key; save_key('%s')", escaped))
 	} else {
 		fmt.Printf("%s Unexpected sync output: %s\n", yellow("[warn]"), syncOut)
 	}
