@@ -166,6 +166,23 @@ def get_local_db_path() -> str:
     return str(DB_PATH)
 
 
+def _open_db(path=None) -> sqlite3.Connection:
+    """Open the shared DB with multi-process-safe settings. Several processes
+    (one hook per Claude session/repo, the git watcher, the MCP server) hit
+    this single file concurrently; the default rollback journal + zero
+    busy-timeout make any concurrent write fail instantly with "database is
+    locked" (which is why set_kv / license caching were dropping writes). WAL +
+    a busy-timeout fix that. See engine/memory.py:_tune_sqlite for the why."""
+    conn = sqlite3.connect(str(path or DB_PATH), timeout=10)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+
+
 def _ensure_kv_table(conn: sqlite3.Connection):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)"
@@ -178,7 +195,7 @@ def get_kv(key: str) -> str | None:
     if not DB_PATH.exists():
         return None
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = _open_db()
         _ensure_kv_table(conn)
         row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         conn.close()
@@ -191,7 +208,7 @@ def set_kv(key: str, value: str):
     """Write a value to the local kv store (upsert)."""
     try:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = _open_db()
         _ensure_kv_table(conn)
         conn.execute(
             "INSERT INTO kv (key, value) VALUES (?, ?) "
@@ -211,7 +228,7 @@ def cache_validation(key: str, result: bool,
     Overwrites any previous entry for this key.
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = _open_db()
     _ensure_license_table(conn)
     now     = datetime.utcnow()
     expires = now + timedelta(days=ttl_days)
@@ -241,7 +258,7 @@ def _get_cached(key: str) -> dict | None:
     if not DB_PATH.exists():
         return None
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = _open_db()
         conn.row_factory = sqlite3.Row
         _ensure_license_table(conn)
         row = conn.execute(
@@ -441,7 +458,7 @@ def get_cached_key() -> str:
     if not DB_PATH.exists():
         return ""
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = _open_db()
         _ensure_license_table(conn)
         row = conn.execute(
             "SELECT key FROM license_cache WHERE valid=1 AND key != '' "
@@ -547,7 +564,7 @@ def downgrade_to_free() -> bool:
     """
     db_path = get_local_db_path()
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _open_db(db_path)
 
         has_skills_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='skills'"

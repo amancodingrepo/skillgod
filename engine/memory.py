@@ -60,10 +60,32 @@ CREATE INDEX IF NOT EXISTS idx_skills_type      ON skills(skill_type);
 """
 
 
+def _tune_sqlite(conn: sqlite3.Connection) -> None:
+    """Make the shared DB safe under concurrent access.
+
+    Several processes hit this single file at once: one hook process per Claude
+    session (and the user may run Claude in multiple repos), the background git
+    watcher, and the MCP server. SQLite's default rollback-journal mode plus a
+    zero busy-timeout means any concurrent write fails INSTANTLY with "database
+    is locked" — and the memory-capture path swallows that, so decisions are
+    silently dropped and `sg timeline` shows nothing. WAL lets readers run
+    concurrently with a single writer; busy_timeout makes a brief lock wait and
+    retry instead of erroring. journal_mode=WAL persists in the file header, so
+    setting it once upgrades every future connection.
+    """
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+
+
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
+    _tune_sqlite(conn)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
