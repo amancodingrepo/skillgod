@@ -108,38 +108,47 @@ def track_cli(command: str):
 # signals.)
 # ─────────────────────────────────────────────
 
-_DECISION_SIGNALS = [
-    r"\bchose\b", r"\bdecided\b", r"\bwe will\b", r"\balways use\b",
-    r"\bnever use\b", r"\bstandard approach\b", r"\barchitecture\b",
-    r"\bconvention\b", r"\bpattern is\b", r"\bapproach is\b",
-]
+def _summary_of(output: str) -> str:
+    """First meaningful line/sentence — the commit SUBJECT for a git message,
+    or the first substantial sentence of an AI output."""
+    out = (output or "").strip()
+    if not out:
+        return ""
+    first = out.splitlines()[0].strip()
+    if len(first) >= 12:
+        return first
+    sentences = re.split(r'[.!?]\s+', out)
+    return next((s.strip() for s in sentences if len(s.strip()) > 20), out[:120])
 
 
 def capture_memory(task: str, output: str, project: str,
-                   session_id: str = "") -> dict:
+                   session_id: str = "", min_importance: float = 0.6) -> dict:
     """
-    Detect an architectural decision in `output` and persist it to memory,
-    keyed to `project`; then attempt to learn a reusable skill from the
-    task/output pair. Returns {"memory": id|None, "skill": path|None}.
-    Pure of any in-process runtime state so a fresh hook process can call it.
-    """
-    captured = {"memory": None, "skill": None}
+    Score `output` for decision-importance (memory.score_importance) and persist
+    it to memory, keyed to `project`; then attempt to learn a reusable skill.
 
-    hits = sum(1 for p in _DECISION_SIGNALS if re.search(p, output.lower()))
-    if hits >= 1:
-        sentences = re.split(r'[.!?]\s+', output)
-        summary   = next(
-            (s.strip() for s in sentences if len(s.strip()) > 20),
-            output[:120]
-        )
-        # BUG FIX — was save_decision(), which never tags git branch/commit.
-        # save_with_git() already has exactly this logic (it just never got
-        # wired into the real, hook-driven capture path) — same kind and
-        # importance save_decision() used, so this is a drop-in swap, not a
-        # behavior change beyond adding the git tag to `detail`.
+    CAPTURE-EVERYTHING (Task 1): the classifier no longer keeps/discards — it
+    scores 0.0–1.0. A row is written whenever importance >= `min_importance`.
+    The git watcher calls with min_importance=0.0 (EVERY commit is captured —
+    silent loss is the worst failure for a memory product; the timeline filters
+    at read time). The post-tool hook keeps the default 0.6 threshold so it does
+    not record every routine AI output.
+
+    Returns {"memory": id|None, "skill": path|None, "importance": float,
+    "markers": [...]}. Pure of in-process state so a fresh hook process can call it.
+    """
+    from memory import score_importance
+    importance, markers = score_importance(output or "")
+    captured = {"memory": None, "skill": None,
+                "importance": importance, "markers": markers}
+
+    if importance >= min_importance:
+        summary = _summary_of(output)
+        # >=0.6 reads as a real decision; below that it's ordinary context.
+        kind = "decision" if importance >= 0.6 else "context"
         captured["memory"] = save_with_git(
-            summary[:200], detail=output[:500], kind="decision",
-            project=project, importance=0.9, session_id=session_id)
+            summary[:200], detail=(output or "")[:500], kind=kind,
+            project=project, importance=importance, session_id=session_id)
 
     learned = learn_skill(task, output, project=project)
     if learned:

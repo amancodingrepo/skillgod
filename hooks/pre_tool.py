@@ -30,6 +30,27 @@ from pathlib import Path
 ENGINE = Path(__file__).parent.parent / "engine"
 sys.path.insert(0, str(ENGINE))
 
+
+def _hooklog(_event, _msg=""):
+    """Task 7.3 — unconditional hook logging. Appends one line to
+    <sgRoot>/logs/hooks.log (== ~/.skillgod/logs on a real install); rotates at
+    1 MB. Self-contained (no engine import) so it works even if the engine is
+    broken. Never raises."""
+    try:
+        import os, time
+        _d = os.path.join(str(Path(__file__).resolve().parent.parent), "logs")
+        os.makedirs(_d, exist_ok=True)
+        _p = os.path.join(_d, "hooks.log")
+        try:
+            if os.path.getsize(_p) > 1_000_000:
+                os.replace(_p, _p + ".1")
+        except OSError:
+            pass
+        with open(_p, "a", encoding="utf-8", errors="replace") as _f:
+            _f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + _event + " " + _msg + chr(10))
+    except Exception:
+        pass
+
 # Windows: hook stdout/stderr are pipes, so Python encodes with the legacy
 # ANSI codepage (cp1252) and printing a skill payload containing ✓/→/… dies
 # with UnicodeEncodeError — injection silently delivers nothing. The host
@@ -106,6 +127,7 @@ def _collect_scan_text(obj, _depth: int = 0) -> str:
 
 
 def main() -> None:
+    _hooklog("pre_tool", "invoked")
     # BUG-021 FIX — read the FULL stdin (was capped at 8192 bytes, so any payload
     # larger than 8KB truncated → JSON parse failed → the old code fell through
     # to exit(0), letting the tool call through completely unscanned). Read it
@@ -186,4 +208,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        _hooklog("pre_tool", "CRASHED" + chr(10) + traceback.format_exc())
+        raise

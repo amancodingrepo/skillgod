@@ -12,17 +12,25 @@ import (
 )
 
 var timelineLimit int
+var timelineAll bool
+var timelineMin float64
 
 var timelineCmd = &cobra.Command{
 	Use:   "timeline",
 	Short: "Show the git-aware memory timeline for this project",
 	Long: `Show recent decisions, patterns, and errors SkillGod captured for this
-project — newest first. Memory is local to your machine.`,
+project — newest first. Memory is local to your machine.
+
+Every commit is captured; by default only importance >= 0.6 (real decisions)
+is shown. Use --all to include low-importance/noise commits, or --min <float>
+to set your own threshold.`,
 	RunE: runTimeline,
 }
 
 func init() {
 	timelineCmd.Flags().IntVar(&timelineLimit, "limit", 30, "max entries to show")
+	timelineCmd.Flags().BoolVar(&timelineAll, "all", false, "show every captured commit, including low-importance noise")
+	timelineCmd.Flags().Float64Var(&timelineMin, "min", 0.6, "minimum importance to show (0.0–1.0)")
 	rootCmd.AddCommand(timelineCmd)
 }
 
@@ -62,11 +70,16 @@ func runTimeline(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot resolve current directory: %w", err)
 	}
+	minImp := timelineMin
+	if timelineAll {
+		minImp = 0.0
+	}
 	code := fmt.Sprintf(
-		`import json;from memory import get_timeline, derive_project_id;`+
+		`import json,os;from memory import get_timeline, timeline_counts, derive_project_id;`+
 			`p=derive_project_id(%q);`+
-			`print(json.dumps({"project": p, "entries": get_timeline(p, %d)}))`,
-		cwd, timelineLimit,
+			`git=os.path.isdir(os.path.join(%q, ".git")) or bool(__import__("subprocess").run(["git","-C",%q,"rev-parse","--git-dir"],capture_output=True).returncode==0);`+
+			`print(json.dumps({"project": p, "is_git_repo": git, "counts": timeline_counts(p, %f), "entries": get_timeline(p, %d, %f)}))`,
+		cwd, cwd, cwd, minImp, timelineLimit, minImp,
 	)
 	out, err := runPython(sgRoot, code)
 	if err != nil {
@@ -74,12 +87,19 @@ func runTimeline(cmd *cobra.Command, args []string) error {
 	}
 
 	var result struct {
-		Project string `json:"project"`
+		Project   string `json:"project"`
+		IsGitRepo bool   `json:"is_git_repo"`
+		Counts    struct {
+			Total  int `json:"total"`
+			Hidden int `json:"hidden"`
+			Shown  int `json:"shown"`
+		} `json:"counts"`
 		Entries []struct {
-			Kind      string `json:"kind"`
-			Summary   string `json:"summary"`
-			Detail    string `json:"detail"`
-			CreatedAt string `json:"created_at"`
+			Kind       string  `json:"kind"`
+			Summary    string  `json:"summary"`
+			Detail     string  `json:"detail"`
+			CreatedAt  string  `json:"created_at"`
+			Importance float64 `json:"importance"`
 		} `json:"entries"`
 	}
 	if json.Unmarshal([]byte(strings.TrimSpace(out)), &result) != nil {
@@ -91,7 +111,8 @@ func runTimeline(cmd *cobra.Command, args []string) error {
 	}
 	if len(result.Entries) == 0 {
 		fmt.Printf("\n%s\n", bold("SkillGod timeline — "+project))
-		fmt.Println(dim("  No memory captured yet. It builds automatically as you code."))
+		printTimelineEmptyState(sgRoot, cwd, project, result.IsGitRepo,
+			result.Counts.Total, result.Counts.Hidden, green, yellow, cyan, dim)
 		fmt.Println()
 		return nil
 	}
@@ -145,8 +166,47 @@ func runTimeline(cmd *cobra.Command, args []string) error {
 			)
 		}
 	}
+	if !timelineAll && result.Counts.Hidden > 0 {
+		fmt.Printf("\n  %s\n", dim(fmt.Sprintf(
+			"%d low-importance entr%s hidden — sg timeline --all",
+			result.Counts.Hidden, plural(result.Counts.Hidden, "y", "ies"))))
+	}
 	fmt.Println()
 	return nil
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// printTimelineEmptyState explains, per context, WHY the timeline is empty
+// instead of a single generic line (Task 7.1): a dead/absent watcher, a
+// non-git dir, or rows hidden below the importance threshold.
+func printTimelineEmptyState(sgRoot, cwd, project string, isGitRepo bool,
+	total, hidden int, green, yellow, cyan, dim func(...interface{}) string) {
+	switch {
+	case hidden > 0:
+		// Rows exist but all below the threshold.
+		fmt.Printf("  %s\n", dim(fmt.Sprintf(
+			"%d low-importance entr%s hidden below the 0.6 default.", hidden, plural(hidden, "y", "ies"))))
+		fmt.Printf("  %s\n", cyan("sg timeline --all")+dim("  shows every captured commit."))
+	case !isGitRepo:
+		fmt.Printf("  %s\n", dim("This directory isn't inside a git repository, so the git"))
+		fmt.Printf("  %s\n", dim("watcher captures nothing here. Memory builds from commits"))
+		fmt.Printf("  %s\n", dim("(and, in Claude Code, from decisions stated in a session)."))
+	case !isWatcherAliveForProject(sgRoot, cwd):
+		fmt.Printf("  %s\n", dim("No memory yet — and no watcher is running for this project."))
+		fmt.Printf("  %s\n", cyan("sg watch")+dim("  starts it; then a commit with decision language"))
+		fmt.Printf("  %s\n", dim("(e.g. \"decision: use X instead of Y\") lands here automatically."))
+	default:
+		fmt.Printf("  %s\n", dim("No memory captured yet. State a decision in a Claude session,"))
+		fmt.Printf("  %s\n", dim("or make a commit like \"decision: use Postgres instead of Redis\"."))
+		fmt.Printf("  %s\n", dim("In Cursor/Windsurf/Antigravity, capture is via commits or the"))
+		fmt.Printf("  %s\n", dim("model calling sg_save_memory."))
+	}
 }
 
 // fmtTimelineDate turns an ISO timestamp into "Mar 15"; falls back to the date prefix.

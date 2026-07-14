@@ -31,10 +31,31 @@ Usage:
   python engine/build_engine_bundle.py v1.0.0
   python engine/build_engine_bundle.py v1.0.0 --out dist/engine.zip
 """
+import hashlib
+import json
+import subprocess
 import sys
 import zipfile
 import tempfile
 from pathlib import Path
+
+
+def _git_short_sha() -> str:
+    """Short git sha for the VERSION build-metadata suffix, or 'nogit'."""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(Path(__file__).resolve().parent.parent),
+             "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+        ).strip() or "nogit"
+    except Exception:
+        return "nogit"
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
 
 # Number of starter skills shipped free (instincts are always included on top).
 FREE_SKILL_COUNT = 30
@@ -109,6 +130,19 @@ def main() -> int:
     instincts = sorted(VAULT_DIR.glob("instincts/*.md"))
     free_skills = pick_free_skills()
 
+    # Task 4 — stamp a precise version: <base>+<short-sha>. The 'v' prefix is
+    # normalized out on the reader side (cli/cmd/root.go versionBase).
+    base = version.lstrip("vV")
+    full_version = f"{base}+{_git_short_sha()}"
+
+    # Task 4 — MANIFEST.json: sha256 of every engine/*.py and hooks/*.py so
+    # `sg doctor` can detect a partially-updated / tampered engine on disk.
+    manifest = {"version": full_version, "files": {}}
+    for p in engine_files:
+        manifest["files"][f"engine/{p.name}"] = _sha256(p)
+    for p in hook_files:
+        manifest["files"][f"hooks/{p.name}"] = _sha256(p)
+
     with zipfile.ZipFile(str(out), "w", zipfile.ZIP_DEFLATED) as zf:
         for p in engine_files:
             zf.write(p, f"engine/{p.name}")
@@ -120,7 +154,8 @@ def main() -> int:
             zf.write(p, f"vault/{p.parent.name}/{p.name}")
         zf.writestr("requirements.txt", ENGINE_REQUIREMENTS)
         zf.writestr("db/.gitkeep", "")
-        zf.writestr("VERSION", version + "\n")
+        zf.writestr("VERSION", full_version + "\n")
+        zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2, sort_keys=True))
 
     # Guardrail: a bundle missing hooks is the exact bug this fixes — fail loud.
     EXPECTED_HOOKS = {"session_start.py", "user_prompt_submit.py",
@@ -132,9 +167,32 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
+    # Task 4/3 self-check: the bundle must (a) contain VERSION + MANIFEST + all
+    # hooks, and (b) import cleanly. Verify against the EXTRACTED tree so a
+    # broken bundle fails the build, not the user's install.
+    with tempfile.TemporaryDirectory() as td:
+        with zipfile.ZipFile(str(out)) as zf:
+            zf.extractall(td)
+        root = Path(td)
+        for req in ("VERSION", "MANIFEST.json", "engine/mcp_server.py"):
+            if not (root / req).exists():
+                print(f"ERROR: bundle self-check failed — missing {req}", file=sys.stderr)
+                return 1
+        # import smoke: the engine package must import against the bundled tree
+        chk = subprocess.run(
+            [sys.executable, "-c",
+             "import sys,os; sys.path.insert(0, os.path.join(sys.argv[1],'engine')); "
+             "import memory, runtime, security, license, fs_watcher; print('import-ok')",
+             str(root)],
+            capture_output=True, text=True)
+        if "import-ok" not in (chk.stdout or ""):
+            print(f"ERROR: bundle self-check failed — engine did not import:\n{chk.stderr}",
+                  file=sys.stderr)
+            return 1
+
     size_mb = out.stat().st_size / (1024 * 1024)
     print(f"engine bundle built: {out}")
-    print(f"  version:    {version}")
+    print(f"  version:    {full_version}")
     print(f"  engine:     {len(engine_files)} python files")
     print(f"  hooks:      {len(hook_files)} lifecycle hooks")
     print(f"  instincts:  {len(instincts)}")

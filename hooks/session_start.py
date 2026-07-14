@@ -26,6 +26,27 @@ from pathlib import Path
 ENGINE = Path(__file__).parent.parent / "engine"
 sys.path.insert(0, str(ENGINE))
 
+
+def _hooklog(_event, _msg=""):
+    """Task 7.3 — unconditional hook logging. Appends one line to
+    <sgRoot>/logs/hooks.log (== ~/.skillgod/logs on a real install); rotates at
+    1 MB. Self-contained (no engine import) so it works even if the engine is
+    broken. Never raises."""
+    try:
+        import os, time
+        _d = os.path.join(str(Path(__file__).resolve().parent.parent), "logs")
+        os.makedirs(_d, exist_ok=True)
+        _p = os.path.join(_d, "hooks.log")
+        try:
+            if os.path.getsize(_p) > 1_000_000:
+                os.replace(_p, _p + ".1")
+        except OSError:
+            pass
+        with open(_p, "a", encoding="utf-8", errors="replace") as _f:
+            _f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + _event + " " + _msg + chr(10))
+    except Exception:
+        pass
+
 # Windows: hook stdout/stderr are pipes, so Python encodes with the legacy
 # ANSI codepage (cp1252) and printing instincts/memory containing ✓/→/… dies
 # with UnicodeEncodeError. The host reads hook output as UTF-8 — emit UTF-8.
@@ -105,6 +126,7 @@ def _check_db_integrity() -> None:
 
 
 def main() -> None:
+    _hooklog("session_start", "invoked")
     # BUG-018 — integrity-check/repair the shared SQLite DB before any read.
     try:
         _check_db_integrity()
@@ -176,4 +198,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        _hooklog("session_start", "CRASHED" + chr(10) + traceback.format_exc())
+        raise

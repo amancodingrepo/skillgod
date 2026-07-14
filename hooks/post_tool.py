@@ -21,6 +21,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "engine"))
 
+
+def _hooklog(_event, _msg=""):
+    """Task 7.3 — unconditional hook logging. Appends one line to
+    <sgRoot>/logs/hooks.log (== ~/.skillgod/logs on a real install); rotates at
+    1 MB. Self-contained (no engine import) so it works even if the engine is
+    broken. Never raises."""
+    try:
+        import os, time
+        _d = os.path.join(str(Path(__file__).resolve().parent.parent), "logs")
+        os.makedirs(_d, exist_ok=True)
+        _p = os.path.join(_d, "hooks.log")
+        try:
+            if os.path.getsize(_p) > 1_000_000:
+                os.replace(_p, _p + ".1")
+        except OSError:
+            pass
+        with open(_p, "a", encoding="utf-8", errors="replace") as _f:
+            _f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + _event + " " + _msg + chr(10))
+    except Exception:
+        pass
+
 # Windows: hook stdout/stderr are pipes (legacy cp1252 default) — emit UTF-8
 # so captured output containing non-ANSI characters can't crash the hook.
 if sys.platform == "win32":
@@ -40,6 +61,7 @@ REWORK_WORDS = [
 
 
 def run(hook_input: dict) -> None:
+    _hooklog("post_tool", "invoked")
     task        = hook_input.get("task", "")
     output      = hook_input.get("output", "")
     session_id  = hook_input.get("session_id", "unknown")
@@ -103,4 +125,9 @@ if __name__ == "__main__":
                 {"id": "python-debug", "name": "Python Debugging"},
             ],
         }
-    run(data)
+    try:
+        run(data)
+    except Exception:
+        import traceback
+        _hooklog("post_tool", "CRASHED" + chr(10) + traceback.format_exc())
+        raise

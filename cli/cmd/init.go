@@ -70,6 +70,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot resolve current directory: %w", err)
 	}
 
+	// Task 4 — refuse init when the installed engine doesn't match the binary
+	// (init registers hooks against the engine on disk; doing so with a stale
+	// engine is exactly the drift that shipped). Instruct, don't guess.
+	if mismatched, ev := engineDrift(); mismatched {
+		fmt.Printf("  %s engine %s does not match sg %s\n", yellow("⚠"), ev, Version)
+		fmt.Printf("     Run %s first to sync the engine, then re-run %s\n",
+			bold("sg update"), bold("sg init"))
+		return fmt.Errorf("engine/binary version mismatch — run sg update")
+	}
+
+	// Task 2d — reap dead/stale/non-repo watchers at the start of init (force,
+	// bypassing the once/hour throttle since the user asked for a full setup).
+	reapStaleWatchers(sgRoot, true)
+
 	// ── Create vault directories (quietly) ─────────────────────────────────
 	for _, d := range []string{
 		filepath.Join(sgRoot, "vault", "instincts"),
@@ -136,12 +150,23 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s could not register Claude Code hooks: %v\n", yellow("○"), herr)
 	} else if len(hookResults) > 0 {
 		fmt.Printf("  %s Registered SkillGod hooks in ~/.claude/settings.json:\n", green("✓"))
+		// Task 7.2 — don't trust mere presence of an entry; verify the hook FILE
+		// exists on disk (the "already present, skipped" blind spot).
+		scriptFor := map[string]string{}
+		for _, he := range claudeHookEvents {
+			scriptFor[he.event] = he.script
+		}
 		for _, r := range hookResults {
-			tag := green("(new)")
+			mark, tag := green("✓"), green("(new)")
 			if r.status == "skipped" {
-				tag = dim("(already present, skipped)")
+				fp := filepath.Join(sgRoot, "hooks", scriptFor[r.event])
+				if _, err := os.Stat(fp); err == nil {
+					tag = dim("(present, file verified)")
+				} else {
+					mark, tag = yellow("⚠"), yellow("(present, FILE MISSING — run sg update)")
+				}
 			}
-			fmt.Printf("       %s %-18s %s\n", green("✓"), r.event, tag)
+			fmt.Printf("       %s %-18s %s\n", mark, r.event, tag)
 		}
 	}
 
@@ -435,6 +460,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  %s      memory timeline for this project\n", bold("sg timeline"))
 	fmt.Printf("  %s         vault health + usage stats\n", bold("sg stats"))
 	fmt.Println()
+	// Task 6 — point users at the self-diagnostic.
+	fmt.Printf("Run %s to verify your install.\n\n", bold("sg doctor"))
 	return nil
 }
 

@@ -96,7 +96,7 @@ def get_head(repo_dir: str) -> str:
     try:
         return subprocess.check_output(
             ["git", "-C", repo_dir, "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True, timeout=10,
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace", timeout=10,
             **_GIT_KWARGS,
         ).strip()
     except FileNotFoundError:
@@ -109,7 +109,7 @@ def get_commit_message(repo_dir: str, sha: str) -> str:
     try:
         return subprocess.check_output(
             ["git", "-C", repo_dir, "log", "-1", "--pretty=%B", sha],
-            stderr=subprocess.DEVNULL, text=True, timeout=10,
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace", timeout=10,
             **_GIT_KWARGS,
         ).strip()
     except Exception:
@@ -141,9 +141,60 @@ def watcher_paths(sg_root: str, project_dir: str) -> tuple[str, str, str]:
             os.path.join(d, h + ".log"))
 
 
-def _read_pid(pid_file: str):
+def _project_id_for(project_dir: str) -> str:
+    """Single source of truth — the SAME derive_project_id() hooks/MCP/CLI use.
+    Never reimplement the id scheme here."""
     try:
-        return int(Path(pid_file).read_text().strip())
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from memory import derive_project_id
+        return derive_project_id(project_dir)
+    except Exception:
+        return ""
+
+
+def _is_git_repo(project_dir: str) -> bool:
+    """True if project_dir is inside a git working tree (walks up for .git)."""
+    try:
+        d = os.path.abspath(project_dir)
+        while True:
+            if os.path.exists(os.path.join(d, ".git")):
+                return True
+            parent = os.path.dirname(d)
+            if parent == d:
+                return False
+            d = parent
+    except Exception:
+        return False
+
+
+def _write_pid_record(pid_file: str, project_dir: str, pid: int) -> None:
+    """Write the JSON watcher record (matches cli/cmd/watch.go's watcherRecord)
+    so liveness can be verified against the right project, not just the pid."""
+    import json as _json
+    rec = {"pid": pid, "project_dir": os.path.abspath(project_dir),
+           "project_id": _project_id_for(project_dir),
+           "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        Path(pid_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(pid_file).write_text(_json.dumps(rec), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _read_pid(pid_file: str):
+    """Read the pid from a watcher record — JSON (new) or bare int (legacy)."""
+    try:
+        raw = Path(pid_file).read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return None
+    if raw.startswith("{"):
+        try:
+            import json as _json
+            return int(_json.loads(raw).get("pid"))
+        except Exception:
+            return None
+    try:
+        return int(raw)
     except Exception:
         return None
 
@@ -195,7 +246,7 @@ def _start_detached(sg_root: str, project_dir: str, pid_file: str, stop_file: st
     py = sys.executable or ("python" if platform.system() == "Windows" else "python3")
     args = [py, watcher_script, os.path.abspath(project_dir), engine_dir,
             "--pid-file", pid_file, "--stop-sentinel", stop_file]
-    logf = open(log_file, "a")
+    logf = open(log_file, "a", encoding="utf-8", errors="replace")
     kwargs = dict(stdout=logf, stderr=logf, stdin=subprocess.DEVNULL)
     if platform.system() == "Windows":
         # DETACHED_PROCESS alone does not reliably suppress the console for a
@@ -208,14 +259,10 @@ def _start_detached(sg_root: str, project_dir: str, pid_file: str, stop_file: st
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(args, **kwargs)
-    # Written immediately from the parent — same reasoning as the Go side:
-    # no window where a concurrent caller could see "no pid file" right after
-    # we've already spawned. The child overwrites this with the identical
-    # value shortly after starting (harmless no-op).
-    try:
-        Path(pid_file).write_text(str(proc.pid))
-    except Exception:
-        pass
+    # Written immediately from the parent as a JSON record (Task 2) — no window
+    # where a concurrent caller sees "no pid file" right after the spawn. The
+    # child rewrites the identical record shortly after starting.
+    _write_pid_record(pid_file, project_dir, proc.pid)
 
 
 def ensure_watcher_running(project_dir: str, sg_root: str = None) -> None:
@@ -242,6 +289,9 @@ def ensure_watcher_running(project_dir: str, sg_root: str = None) -> None:
     try:
         if sg_root is None:
             sg_root = str(Path(__file__).resolve().parent.parent)
+        # Task 2b — never start a watcher for a non-repo (e.g. a home dir).
+        if not _is_git_repo(project_dir):
+            return
         pid_file, stop_file, log_file = watcher_paths(sg_root, project_dir)
 
         pid = _read_pid(pid_file)
@@ -295,11 +345,18 @@ def check_once(repo_dir: str, engine_dir: str, last_sha: str) -> str:
 
     try:
         project = derive_project_id(repo_dir)
-        result = capture_memory(task=f"git commit {head[:8]}", output=msg, project=project)
-        if result.get("memory"):
-            _log(f"commit {head[:8]} on project={project}: captured memory #{result['memory']}")
-        else:
-            _log(f"commit {head[:8]} on project={project}: no decision language, not captured")
+        # min_importance=0.0 → EVERY commit is captured, never silently dropped
+        # (Task 1). The timeline filters by importance at read time.
+        result = capture_memory(task=f"git commit {head[:8]}", output=msg,
+                                project=project, min_importance=0.0)
+        imp = result.get("importance", 0.0)
+        markers = result.get("markers") or []
+        mtxt = ("matched: " + ", ".join(repr(m) for m in markers)) if markers else "no decision markers"
+        mem = result.get("memory")
+        tail = f" — captured #{mem}" if mem else ""
+        if imp < 0.6:
+            tail += " (below timeline default)"
+        _log(f"commit {head[:8]} on project={project}: importance={imp:.2f} ({mtxt}){tail}")
     except Exception as e:
         # A capture-layer hiccup must never crash the watcher — there's no
         # supervisor to restart it, and dying silently in the background is
@@ -451,7 +508,15 @@ def main() -> None:
     p.add_argument("engine_dir")
     p.add_argument("--once", action="store_true")
     p.add_argument("--baseline", default=None)
-    p.add_argument("--poll-interval", type=float, default=2.0)
+    # Task 3 — poll loop is a blessed, supported path (watchdog is an optional
+    # accelerator that's usually absent). Default 5s, override with
+    # SKILLGOD_POLL_INTERVAL or --poll-interval.
+    _default_poll = 5.0
+    try:
+        _default_poll = float(os.environ.get("SKILLGOD_POLL_INTERVAL", "5.0"))
+    except Exception:
+        _default_poll = 5.0
+    p.add_argument("--poll-interval", type=float, default=_default_poll)
     p.add_argument("--stop-sentinel", default=None)
     p.add_argument("--pid-file", default=None)
     p.add_argument("--force-poll", action="store_true",
@@ -460,10 +525,15 @@ def main() -> None:
                         "exercise the fallback poll loop)")
     args = p.parse_args()
 
+    # Task 2b — never watch a non-repo (evidence: a watcher polled C:\\Users\\Asus
+    # indefinitely). Refuse before writing a pid file or entering any loop.
+    if not _is_git_repo(args.project_dir):
+        _log(f"{args.project_dir} is not inside a git repository — watcher not started")
+        return
+
     if args.pid_file:
         try:
-            Path(args.pid_file).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.pid_file).write_text(str(os.getpid()))
+            _write_pid_record(args.pid_file, args.project_dir, os.getpid())
         except Exception as e:
             _log(f"could not write pid file {args.pid_file}: {e}")
 
@@ -492,8 +562,12 @@ def main() -> None:
             ran_event = event_loop(args.project_dir, args.engine_dir,
                                    last_sha, args.stop_sentinel)
         if not ran_event:
-            if not args.force_poll:
-                _log("watchdog unavailable or no .git — using poll loop")
+            # Task 3 — split the old ambiguous "watchdog unavailable or no .git"
+            # into two distinct, actionable messages. The no-.git case already
+            # exited above (Task 2b), so here it's specifically about watchdog.
+            if not args.force_poll and not _watchdog_available():
+                _log(f"watchdog not installed — using poll loop "
+                     f"(interval {args.poll_interval:g}s)")
             poll_loop(args.project_dir, args.engine_dir, last_sha,
                       args.poll_interval, args.stop_sentinel)
     except KeyboardInterrupt:

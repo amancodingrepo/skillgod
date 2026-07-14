@@ -59,6 +59,116 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE INDEX IF NOT EXISTS idx_skills_type      ON skills(skill_type);
 """
 
+# Default importance floor for what `sg timeline` shows and what the injection
+# recall path surfaces. Everything is CAPTURED regardless; this only filters
+# reads. Kept at 0.6 so genuine decisions (>=0.85) show and conventional-commit
+# noise (<=0.15) is hidden by default.
+TIMELINE_MIN_IMPORTANCE = 0.6
+INJECT_MIN_IMPORTANCE   = 0.6
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Decision-importance classifier  (Task 1 — root-cause fix)
+#
+# Replaces the old binary keep/discard keyword gate (which rejected explicit
+# "decision:" / "instead of" / "switching to" commits and kept incidental
+# noise). Design: CAPTURE EVERYTHING, score 0.0–1.0 at write time, filter at
+# read time. Silent loss is the worst failure mode for a memory product.
+# The subject line (first line) is weighted far above the body.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Slam-dunk decision markers — an explicit architectural choice. (regex, name)
+_DECISION_MARKERS = [
+    (r"\bdecision\s*[:\-]", "decision:"),
+    (r"\bwe\s+decided\b",              "we decided"),
+    (r"\bdecided\b",                   "decided"),
+    (r"\bdecide[sd]?\s+to\b",          "decide to"),
+    (r"\bchose\b",                     "chose"),
+    (r"\bchoos(?:e|ing)\b",            "choosing"),
+    (r"\bswitch(?:ing|ed)?\s+to\b",    "switching to"),
+    (r"\bswitch(?:ing|ed)?\s+from\b",  "switching from"),
+    (r"\binstead\s+of\b",              "instead of"),
+    (r"\bmigrat(?:e|es|ing|ed)\s+to\b","migrating to"),
+    (r"\badopt(?:s|ing|ed)?\b",        "adopting"),
+    (r"\bwe\s+will\s+use\b",           "we will use"),
+    (r"\bwe\s+will\b",                 "we will"),
+    (r"\bgoing\s+with\b",              "going with"),
+    (r"\bin\s+favou?r\s+of\b",         "in favor of"),
+    (r"\btrade[\s\-]?off\b",           "tradeoff"),
+    (r"\brevert(?:ed|ing)?\b[^\n]*\bbecause\b", "revert because"),
+    (r"\bstandardiz(?:e|es|ing|ed)\s+on\b",     "standardize on"),
+    (r"\balways\s+use\b",              "always use"),
+    (r"\bnever\s+use\b",               "never use"),
+]
+
+# Pure-noise conventional-commit prefixes / markers.
+_NOISE_MARKERS = [
+    (r"^\s*chore\s*[:\(]",  "chore:"),
+    (r"^\s*build\s*[:\(]",  "build:"),
+    (r"^\s*ci\s*[:\(]",     "ci:"),
+    (r"^\s*style\s*[:\(]",  "style:"),
+    (r"^\s*merge\b",        "merge"),
+    (r"^\s*wip\b",          "wip"),
+    (r"\bbump\b",           "bump"),
+    (r"\bfix\s+typo\b",     "fix typo"),
+    (r"\bformatting\b",     "formatting"),
+    (r"\blint(?:ing)?\b",   "lint"),
+]
+
+_DOCS_PREFIX    = re.compile(r"^\s*docs\s*[:\(]", re.IGNORECASE)
+_VERSION_BUMP   = re.compile(r"^\s*(?:bump\b|release\b|v?\d+\.\d+\.\d+\s*$)", re.IGNORECASE)
+
+
+def score_importance(message: str) -> tuple[float, list[str]]:
+    """Score a commit/decision message 0.0–1.0, returning (importance, matched).
+
+    Never discards — the caller captures every message; this only ranks. Case-
+    insensitive; the subject line (first line) is weighted above the body. Never
+    raises on any input (including empty or non-ASCII)."""
+    msg = (message or "").strip()
+    if not msg:
+        return 0.05, ["empty"]
+    lines = msg.splitlines()
+    subject = lines[0] if lines else ""
+    body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+
+    subj_hits, body_hits = [], []
+    for pat, name in _DECISION_MARKERS:
+        if re.search(pat, subject, re.IGNORECASE):
+            subj_hits.append(name)
+        elif re.search(pat, body, re.IGNORECASE):
+            body_hits.append(name)
+
+    is_docs = _DOCS_PREFIX.match(subject) is not None
+
+    # A decision stated right in the subject line — highest confidence, and it
+    # overrides a docs: / noise prefix (intent beats prefix).
+    if subj_hits:
+        imp = 0.95 if len(subj_hits) >= 2 else 0.9
+        if is_docs:
+            imp = max(0.7, imp - 0.1)  # docs+slam-dunk in subject → high, >=0.7
+        return round(imp, 2), subj_hits + body_hits
+
+    # docs: prefix without a subject-line decision → capped low regardless of
+    # body (a design-doc mentioning "chose" is documentation, not a decision).
+    if is_docs:
+        return (0.4, body_hits + ["docs:"]) if body_hits else (0.3, ["docs:"])
+
+    # Decision language only in the body → strong but not slam-dunk.
+    if body_hits:
+        return round(min(0.85, 0.5 + 0.15 * len(body_hits)), 2), body_hits
+
+    # Pure noise prefixes / version bumps.
+    noise = [name for pat, name in _NOISE_MARKERS
+             if re.search(pat, subject, re.IGNORECASE) or re.search(pat, msg, re.IGNORECASE)]
+    if noise:
+        return 0.1, noise
+    if _VERSION_BUMP.match(subject):
+        return 0.1, ["version-bump"]
+
+    # Ordinary commit — mid baseline (shown with --all, hidden by default).
+    return 0.35, []
+
 
 def _tune_sqlite(conn: sqlite3.Connection) -> None:
     """Make the shared DB safe under concurrent access.
@@ -164,9 +274,16 @@ def get_recent(project: str = "default", limit: int = 10,
 
 def get_relevant(task: str, project: str = "default",
                  limit: int = 5) -> list[dict]:
-    """Get memories relevant to a task using keyword matching."""
+    """Get memories relevant to a task using keyword matching.
+
+    Filters by importance at read time (Task 1): now that the watcher captures
+    EVERY commit (including low-importance noise at ~0.1), the injection path
+    only surfaces rows at INJECT_MIN_IMPORTANCE or above — genuine decisions
+    (>=0.85) and session summaries (0.6), never conventional-commit noise. This
+    preserves the pre-fix injection volume (only decisions ever injected)."""
     task_words = set(re.findall(r'\b\w{4,}\b', task.lower()))
-    all_mem    = get_recent(project, limit=50)
+    all_mem    = [m for m in get_recent(project, limit=100)
+                  if m.get("importance", 0.0) >= INJECT_MIN_IMPORTANCE]
     scored     = []
     for m in all_mem:
         mem_words = set(re.findall(r'\b\w{4,}\b',
@@ -305,7 +422,7 @@ def derive_project_id(cwd: str = "") -> str:
     try:
         remote = subprocess.check_output(
             ["git", "-C", str(base), "config", "--get", "remote.origin.url"],
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
         ).strip()
     except Exception:
         remote = ""
@@ -339,15 +456,15 @@ def get_git_context() -> dict:
     try:
         branch = subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace"
         ).strip()
         commit = subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace"
         ).strip()
         msg = subprocess.check_output(
             ["git", "log", "-1", "--pretty=%s"],
-            stderr=subprocess.DEVNULL, text=True
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace"
         ).strip()
         ctx = {"branch": branch, "commit": commit, "last_commit_msg": msg}
     except Exception:
@@ -367,25 +484,44 @@ def save_with_git(summary: str, detail: str = "", kind: str = "context",
                 session_id=session_id, importance=importance)
 
 
-def get_timeline(project: str = "default", limit: int = 30) -> list[dict]:
+def get_timeline(project: str = "default", limit: int = 30,
+                 min_importance: float = TIMELINE_MIN_IMPORTANCE) -> list[dict]:
     """
     Chronological memory timeline, newest first.
-    Each entry: { kind, summary, detail, created_at }. Powers `sg timeline`.
+    Each entry: { kind, summary, detail, created_at, importance }. Powers
+    `sg timeline`.
+
+    Filters by importance (Task 1): default shows importance >= 0.6 (real
+    decisions); pass min_importance=0.0 for `sg timeline --all`. Also returns a
+    count of rows hidden below the threshold so the CLI can say "N low-importance
+    entries hidden".
 
     BUG FIX — used to select only (kind, summary, created_at). The git
-    branch/commit tag save_with_git() writes lives in `detail` (there is no
-    separate branch/commit column — see capture_memory()), so without
-    `detail` here `sg timeline` had no way to show it even after the
-    capture-side fix.
+    branch/commit tag save_with_git() writes lives in `detail`, so `detail` is
+    selected here too.
     """
     conn = get_db()
     rows = conn.execute(
-        "SELECT kind, summary, detail, created_at FROM memory WHERE project=? "
-        "ORDER BY created_at DESC LIMIT ?",
-        (project, limit)
+        "SELECT kind, summary, detail, created_at, importance FROM memory "
+        "WHERE project=? AND importance >= ? ORDER BY created_at DESC LIMIT ?",
+        (project, min_importance, limit)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def timeline_counts(project: str = "default",
+                    min_importance: float = TIMELINE_MIN_IMPORTANCE) -> dict:
+    """Row counts for `sg timeline`'s empty/partial-state messaging: total rows
+    for the project and how many are hidden below the importance threshold."""
+    conn = get_db()
+    total = conn.execute("SELECT COUNT(*) FROM memory WHERE project=?",
+                         (project,)).fetchone()[0]
+    hidden = conn.execute(
+        "SELECT COUNT(*) FROM memory WHERE project=? AND importance < ?",
+        (project, min_importance)).fetchone()[0]
+    conn.close()
+    return {"total": total, "hidden": hidden, "shown": total - hidden}
 
 
 def get_memory_index(project: str = "default", limit: int = 1000) -> list[dict]:
